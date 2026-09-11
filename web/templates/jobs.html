@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Phiên nhập{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Phiên nhập</h1>
+    <p class="sub">Lịch sử mọi lần nhập sản phẩm - theo dõi tiến trình, duyệt bản nháp, thử lại khi lỗi.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-primary" href="/import">{{ icon("plus") }} Nhập sản phẩm</a>
+  </div>
+</div>
+
+<section class="card">
+  <div class="tabs" id="tabs" role="tablist" style="padding:0 12px">
+    <button data-tab="all" class="on">Tất cả <span class="count" data-count="all"></span></button>
+    <button data-tab="active">Đang xử lý <span class="count" data-count="active"></span></button>
+    <button data-tab="review">Chờ duyệt <span class="count" data-count="review"></span></button>
+    <button data-tab="done">Hoàn tất <span class="count" data-count="done"></span></button>
+    <button data-tab="failed">Lỗi / đã huỷ <span class="count" data-count="failed"></span></button>
+  </div>
+  <div id="jobs-table"><div class="card-body"><div class="skeleton" style="height:120px"></div></div></div>
+</section>
+{% endblock %}
+{% block scripts %}<script type="module" src="{{ url_for('static', filename='js/jobs.js') }}?v={{ version }}"></script>{% endblock %}

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Product Maker{% endblock %} · VCHANNEL</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v={{ version }}">
+  <script>
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("pm-theme"); } catch (e) {}
+      if (!t) t = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+    window.PM_ICONS = "{{ url_for('static', filename='icons.svg') }}";
+  </script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="/">
+      <span class="brand-mark">{{ icon("logo") }}</span>
+      <span>
+        <div class="brand-name">Product Maker</div>
+        <div class="brand-sub">VCHANNEL Store</div>
+      </span>
+    </a>
+
+    <nav class="nav">
+      <a href="/" class="{{ 'active' if page == 'dashboard' }}">{{ icon("dashboard") }} Tổng quan</a>
+      <a href="/import" class="{{ 'active' if page == 'import' }}">{{ icon("import") }} Nhập sản phẩm</a>
+      <a href="/jobs" class="{{ 'active' if page == 'jobs' }}">{{ icon("layers") }} Phiên nhập
+        {% if nav_counts.review %}<span class="count hot" title="Chờ duyệt">{{ nav_counts.review }}</span>
+        {% elif nav_counts.active %}<span class="count" title="Đang xử lý">{{ nav_counts.active }}</span>{% endif %}
+      </a>
+      <a href="/products" class="{{ 'active' if page == 'products' }}">{{ icon("package") }} Sản phẩm</a>
+      <div class="nav-label">Hệ thống</div>
+      <a href="/settings" class="{{ 'active' if page == 'settings' }}">{{ icon("settings") }} Cài đặt
+        {% if missing_keys %}<span class="count hot" title="Thiếu cấu hình">!</span>{% endif %}
+      </a>
+    </nav>
+
+    <div class="sidebar-foot">
+      {% if site_url and not missing_keys %}
+      <a class="site-pill" href="{{ site_url }}/wp-admin/edit.php?post_type=product" target="_blank" rel="noopener" title="Mở danh sách sản phẩm trên WordPress">
+        <span class="dot"></span><span>{{ site_url.replace('https://', '') }}</span>
+      </a>
+      {% else %}
+      <a class="site-pill" href="/settings"><span class="dot off"></span><span>Chưa kết nối website</span></a>
+      {% endif %}
+      <div class="sidebar-row">
+        <span>v{{ version }}</span>
+        <button class="btn btn-ghost btn-sm btn-icon" id="theme-toggle" title="Đổi giao diện sáng/tối" aria-label="Đổi giao diện sáng/tối">
+          <span data-theme-icon="light">{{ icon("moon", "i-sm") }}</span>
+          <span data-theme-icon="dark">{{ icon("sun", "i-sm") }}</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="btn btn-ghost btn-icon" id="nav-toggle" aria-label="Mở menu">{{ icon("menu") }}</button>
+      <a class="brand" href="/" style="padding:0"><span class="brand-mark" style="width:30px;height:30px">{{ icon("logo") }}</span><span class="brand-name">Product Maker</span></a>
+    </header>
+    <main class="content {% block content_class %}{% endblock %}">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+{% block scripts %}{% endblock %}
+<script type="module" src="{{ url_for('static', filename='js/shell.js') }}?v={{ version }}"></script>
+</body>
+</html>
