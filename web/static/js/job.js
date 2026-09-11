@@ -238,6 +238,7 @@ function appendLogs(logs) {
   if (!logLines.length) consoleEl.textContent = "";
   const nearBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 60;
   for (const l of logs) {
+    if (l.id <= lastLogId) continue;
     logLines.push(l);
     consoleEl.appendChild(h("div", { class: `console-line ${l.level}` },
       h("span", { class: "t" }, fmtTime(l.ts)),
@@ -260,7 +261,16 @@ $("#log-toggle").addEventListener("click", (e) => {
 $("#log-copy").addEventListener("click", () => copyText(logLines.map((l) => `${fmtTime(l.ts)} [${l.stage}] ${l.message}`).join("\n")));
 
 // ---------------------------------------------------------------- polling
+let polling = null;
 async function poll(immediate = false) {
+  // One request at a time: an action button's poll(true) waits for a timed
+  // poll in flight instead of racing it (duplicate logs, stale views).
+  if (polling) { await polling; if (!immediate) return; }
+  polling = pollOnce(immediate);
+  try { await polling; } finally { polling = null; }
+}
+
+async function pollOnce(immediate) {
   clearTimeout(pollTimer);
   try {
     const data = await api("GET", `/api/jobs/${JOB_ID}?after=${lastLogId}&draft=${job && job.status === "review" && renderedKey.startsWith("review") ? 0 : 1}`);

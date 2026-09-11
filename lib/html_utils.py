@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from html import escape
 
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, CData, Comment, Declaration, Doctype, NavigableString, ProcessingInstruction
 
 ALLOWED_TAGS = {
     "p", "br", "h2", "h3", "h4", "strong", "b", "em", "i", "u", "ul", "ol", "li",
@@ -35,6 +35,10 @@ def sanitize_html(html: str) -> str:
     if not html:
         return ""
     soup = BeautifulSoup(html, "html.parser")
+    # Non-text nodes can smuggle markup past the tag allowlist (a CDATA
+    # section containing "<img onerror>" is re-parsed by browsers).
+    for node in soup.find_all(string=lambda n: isinstance(n, (Comment, CData, Declaration, Doctype, ProcessingInstruction))):
+        node.extract()
     for tag in soup.find_all(True):
         if tag.decomposed:
             continue

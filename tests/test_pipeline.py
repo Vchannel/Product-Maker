@@ -127,3 +127,75 @@ def test_legacy_cache_formats_are_read(fake_ai, store):
     draft = pipeline.prepare([url], options())
     assert draft["box_items"] == ["Túi", "Dây"]
     assert fake_ai.box_calls == 0
+
+
+def test_variation_sku_clash_is_caught_before_any_write(fake_ai, store):
+    # A simple product imported earlier owns the SKU the Creator variation would get.
+    a = seed_product("dji-pocket-4-creator-combo", "DJI Pocket 4 Creator Combo", 14740000)
+    b = seed_product("dji-pocket-4-standard-combo", "DJI Pocket 4 Standard Combo", 11635000)
+    pipeline.publish(pipeline.prepare([a], options()))
+    products_before = dict(store.products)
+
+    draft = pipeline.prepare([a, b], options(status="publish"))
+    with pytest.raises(pipeline.WooCommerceAPIError, match="đang được dùng bởi sản phẩm"):
+        pipeline.publish(draft)
+    assert store.products == products_before, "no half-built parent left on the store"
+
+
+def test_new_variable_parent_goes_live_only_after_variations(fake_ai, store, monkeypatch):
+    a = seed_product("x-creator-combo", "DJI X Creator Combo", 1000000)
+    b = seed_product("x-standard-combo", "DJI X Standard Combo", 900000)
+    draft = pipeline.prepare([a, b], options(status="publish"))
+    statuses = []
+    original = store.create_variation
+
+    def spy(pid, payload):
+        statuses.append(store.products[pid]["status"])
+        return original(pid, payload)
+
+    monkeypatch.setattr(store, "create_variation", spy)
+    result = pipeline.publish(draft)
+    assert statuses == ["draft", "draft"]
+    assert store.products[result["product_id"]]["status"] == "publish"
+    state = pipeline.load_json(pipeline.settings.CACHE_DIR / draft["key"] / "state.json")
+    assert len(state["variations"]) == 2
+
+
+def test_skipped_result_reports_prices_on_the_store(fake_ai, store):
+    url = seed_product("osmo-mobile", "DJI Osmo Mobile", 3000000)
+    draft = pipeline.prepare([url], options(discount_vnd=0))
+    created = pipeline.publish(draft)
+    store.products[created["product_id"]]["regular_price"] = "2000000"
+    draft["regular_price"] = 9999999
+    result = pipeline.publish(draft)
+    assert result["action"] == "skipped"
+    assert result["price_min"] == 2000000
+
+
+def test_cancel_during_ai_step_stops_before_review(fake_ai, store):
+    url = seed_product("cancel-me", "DJI Cancel", 1000000)
+
+    class CancelDuringRewrite(pipeline.Reporter):
+        cancelled = False
+
+        def log(self, stage, msg, level="info"):
+            if "đang viết lại" in msg:
+                self.cancelled = True
+
+        def check_cancelled(self):
+            if self.cancelled:
+                raise pipeline.Cancelled()
+
+    with pytest.raises(pipeline.Cancelled):
+        pipeline.prepare([url], options(), CancelDuringRewrite())
+
+
+def test_draft_key_and_image_paths_are_validated(fake_ai, store):
+    url = seed_product("safe", "DJI Safe", 1000000)
+    draft = pipeline.prepare([url], options())
+    for bad_key in ["/etc", "../x", "Safe Key"]:
+        with pytest.raises(pipeline.DraftError):
+            pipeline.normalize_draft(dict(draft, key=bad_key))
+    for ref in ["../safe/x.png", "./images/x.png", "safe/../raw.json"]:
+        with pytest.raises(pipeline.DraftError):
+            pipeline.resolve_image(ref)

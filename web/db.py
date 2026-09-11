@@ -116,6 +116,25 @@ class Database:
         values.append(job_id)
         self.execute(f"UPDATE jobs SET {', '.join(cols)} WHERE id = ?", values)
 
+    def transition(self, job_id: str, from_statuses: tuple, phase: Optional[str] = None, **fields) -> bool:
+        """Atomically update a job only if it is still in one of from_statuses
+        (and phase, when given). Returns False when another request/the worker
+        changed it first - callers must not assume their write happened."""
+        fields["updated_at"] = time.time()
+        cols, values = [], []
+        for key, value in fields.items():
+            if key in JSON_JOB_FIELDS and value is not None:
+                value = json.dumps(value, ensure_ascii=False)
+            cols.append(f"{key} = ?")
+            values.append(value)
+        sql = f"UPDATE jobs SET {', '.join(cols)} WHERE id = ? AND status IN ({','.join('?' * len(from_statuses))})"
+        values += [job_id, *from_statuses]
+        if phase is not None:
+            sql += " AND phase = ?"
+            values.append(phase)
+        with self._lock:
+            return self._conn.execute(sql, values).rowcount == 1
+
     def get_job(self, job_id: str) -> Optional[dict]:
         return self._decode_job(self.one("SELECT * FROM jobs WHERE id = ?", (job_id,)))
 

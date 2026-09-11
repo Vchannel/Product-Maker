@@ -1,6 +1,6 @@
 // Draft review editor: everything that will be sent to WooCommerce, editable,
 // autosaved, with a storefront-like preview before publishing.
-import { $, $$, api, h, icon, render, fmtVND, fmtNum, debounce, toast, toastError, modal, confirmDialog, withLoading, mediaUrl, hostOf } from "./core.js";
+import { $, $$, api, h, icon, render, fmtVND, fmtNum, debounce, toast, toastError, modal, confirmDialog, withLoading, mediaUrl, hostOf, sanitizeHtml, setSafeHtml } from "./core.js";
 import { categoryPicker, tagInput, richEditor, itemList, priceInput, textLength } from "./components.js";
 
 const TITLE_SOFT_MAX = 90;
@@ -406,14 +406,14 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
       : h("div", { class: "sp-price" }, fmtVND(draft.sale_price || draft.regular_price), draft.sale_price ? h("s", null, fmtVND(draft.regular_price)) : null);
 
     const desc = h("div", { class: "prose" });
-    desc.innerHTML = interleave(draft.description, draft.insert_images ? draft.images.map((r) => mediaUrl(r)) : []);
+    setSafeHtml(desc, interleave(sanitizeHtml(draft.description), draft.insert_images ? draft.images.map((r) => mediaUrl(r)) : []));
     if (!variable && draft.box_items?.length) desc.appendChild(boxList(draft.box_items));
     if (draft.include_specs && draft.spec_sections?.length) {
       desc.appendChild(h("h3", null, "Thông số kỹ thuật"));
       desc.appendChild(specsTable(draft.spec_sections));
     }
     const short = h("div", { class: "prose small" });
-    short.innerHTML = draft.short_description;
+    setSafeHtml(short, draft.short_description);
 
     modal({
       title: "Xem trước trên cửa hàng",
@@ -460,8 +460,8 @@ function boxList(items) {
 }
 
 function interleave(html, urls) {
-  const tmp = document.createElement("div");
-  tmp.innerHTML = html || "";
+  // Works on an inert parsed document; the caller sanitizes before and after.
+  const tmp = new DOMParser().parseFromString(`<body>${html || ""}</body>`, "text/html").body;
   const blocks = [...tmp.children];
   if (!urls.length || !blocks.length) return tmp.innerHTML;
   const gap = Math.max(1, Math.floor(blocks.length / urls.length));
@@ -470,10 +470,19 @@ function interleave(html, urls) {
     if (i === 0) return;
     since++;
     if (since >= gap && u < urls.length) {
-      b.after(Object.assign(document.createElement("p"), { innerHTML: `<img src="${urls[u++]}" alt="">` }));
+      b.after(imgPara(tmp.ownerDocument, urls[u++]));
       since = 0;
     }
   });
-  while (u < urls.length) tmp.appendChild(Object.assign(document.createElement("p"), { innerHTML: `<img src="${urls[u++]}" alt="">` }));
+  while (u < urls.length) tmp.appendChild(imgPara(tmp.ownerDocument, urls[u++]));
   return tmp.innerHTML;
+}
+
+function imgPara(doc, url) {
+  const p = doc.createElement("p");
+  const img = doc.createElement("img");
+  img.setAttribute("src", url);
+  img.setAttribute("alt", "");
+  p.appendChild(img);
+  return p;
 }

@@ -92,7 +92,14 @@ def save_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    for attempt in range(6):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:  # Windows: file briefly held by antivirus/OneDrive/a reader
+            if attempt == 5:
+                raise
+            time.sleep(0.15 * (attempt + 1))
 
 
 def slugify(text: str) -> str:
@@ -158,7 +165,9 @@ def image_id(slug: str, filename: str) -> str:
     return f"{slug}/{filename}"
 
 
-_SAFE_PART = re.compile(r"^[A-Za-z0-9._-]+$")
+_SAFE_SLUG = re.compile(r"^[A-Za-z0-9_-]+$")
+_SAFE_FILE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
+_SAFE_KEY = re.compile(r"^(_variable-)?[a-z0-9][a-z0-9-]*$")
 
 
 def resolve_image(image_ref: str, original: bool = False) -> Path:
@@ -166,7 +175,7 @@ def resolve_image(image_ref: str, original: bool = False) -> Path:
         slug, filename = image_ref.split("/", 1)
     except ValueError as e:
         raise DraftError(f"Mã ảnh không hợp lệ: {image_ref}") from e
-    if not _SAFE_PART.match(slug) or not _SAFE_PART.match(filename) or filename.startswith("."):
+    if not _SAFE_SLUG.match(slug) or not _SAFE_FILE.match(filename) or ".." in filename:
         raise DraftError(f"Mã ảnh không hợp lệ: {image_ref}")
     base = product_dir(slug) / "images"
     path = (base / "_original" / filename) if original else (base / filename)
@@ -219,12 +228,17 @@ class PrepareOptions:
 
 
 def _to_int(value, default: int = 0) -> int:
-    if value is None or value == "":
+    """Whole VND from JSON numbers, WooCommerce strings ("14740000", "14740000.00")
+    or formatted input ("14.740.000")."""
+    if value is None or value == "" or isinstance(value, bool):
         return default
-    try:
-        return int(float(str(value).replace(",", "").replace(".", "") if isinstance(value, str) else value))
-    except (TypeError, ValueError):
-        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if re.fullmatch(r"\d+(\.\d{1,2})?", text):
+        return int(float(text))
+    digits = re.sub(r"[^\d]", "", text)
+    return int(digits) if digits else default
 
 
 def get_product(url: str, force: bool = False, reporter: Optional[Reporter] = None) -> ProductData:
@@ -432,7 +446,9 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
         if group["warning"]:
             reporter.log("content", group["warning"], "warn")
         rewritten = _rewrite(key_dir, group["title"], base, model, options.force_rewrite, reporter)
+    reporter.check_cancelled()
     existing = _find_existing(group["sku"], key_dir, reporter)
+    reporter.check_cancelled()
     if existing:
         reporter.log("content", f"Sản phẩm SKU {group['sku']} đã có trên site (#{existing['id']} · {existing['status']})", "warn")
     reporter.stage("content", "done")
@@ -502,6 +518,24 @@ def normalize_draft(draft: dict) -> dict:
     if not isinstance(draft, dict) or draft.get("kind") not in ("simple", "variable"):
         raise DraftError("Bản nháp không hợp lệ.")
     d = dict(draft)
+    if not isinstance(d.get("key"), str) or not _SAFE_KEY.match(d["key"]):
+        raise DraftError("Bản nháp không hợp lệ (key).")
+    urls = d.get("source_urls")
+    if not isinstance(urls, list) or not urls:
+        raise DraftError("Bản nháp không hợp lệ (source_urls).")
+    try:
+        d["source_urls"] = [str(u) for u in urls if validate_url(str(u))]
+    except ScrapeError as e:
+        raise DraftError(str(e)) from e
+    sections = []
+    for sec in d.get("spec_sections") or []:
+        if not isinstance(sec, dict):
+            continue
+        rows = [[str(r[0]), str(r[1])] for r in sec.get("rows") or [] if isinstance(r, (list, tuple)) and len(r) >= 2]
+        sections.append({"heading": str(sec.get("heading", "")), "rows": rows})
+    d["spec_sections"] = sections
+    d["brand"] = str(d.get("brand") or "")
+    d["source_title"] = str(d.get("source_title") or "")
     d["title"] = " ".join(str(d.get("title", "")).split())
     if not d["title"]:
         raise DraftError("Tên sản phẩm không được để trống.")
@@ -552,7 +586,12 @@ def normalize_draft(draft: dict) -> dict:
         labels, skus = set(), set()
         cleaned = []
         for v in variants:
+            if not isinstance(v, dict):
+                raise DraftError("Bản nháp không hợp lệ (variants).")
             v = dict(v)
+            v["source_url"] = str(v.get("source_url") or "")
+            v["source_title"] = str(v.get("source_title") or "")
+            v["slug"] = str(v.get("slug") or "")
             v["label"] = " ".join(str(v.get("label", "")).split())
             if not v["label"]:
                 raise DraftError("Tên phiên bản không được để trống.")
@@ -745,6 +784,19 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
     def existing_variation(v: dict) -> Optional[dict]:
         return by_sku.get(v["sku"]) or by_label.get(v["label"].lower())
 
+    # Variation SKUs that are about to be created must not belong to another
+    # product (e.g. a simple product imported earlier from the same link) -
+    # WooCommerce would reject them only after the parent already exists.
+    for v in draft["variants"]:
+        if existing_variation(v):
+            continue
+        clash = wc.find_product_by_sku(v["sku"])
+        if clash and (not existing or clash["id"] != existing["id"]):
+            raise WooCommerceAPIError(
+                f"SKU '{v['sku']}' của phiên bản '{v['label']}' đang được dùng bởi sản phẩm #{clash['id']} "
+                f"(\"{clash.get('name', '')}\"). Đổi SKU của phiên bản trong bước duyệt, hoặc xoá/đổi SKU sản phẩm cũ."
+            )
+
     # 2. Upload only the images that will actually be referenced.
     needed, titles = [], {}
     if write_content:
@@ -764,7 +816,8 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
         media = {}
         reporter.stage("upload", "skipped", "không cần ảnh mới")
 
-    # 3. Product
+    # 3. Product. Last cancellation point: once the first store write has
+    # happened the job runs to the end, so it never leaves a half-built product.
     reporter.check_cancelled()
     reporter.stage("publish", "running")
 
@@ -788,6 +841,19 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
             payload["brands"] = [{"id": brand["id"]}]
         return payload
 
+    def remember(product_id: int, variations: dict) -> None:
+        state.update(
+            {
+                "product_id": product_id,
+                "kind": draft["kind"],
+                "sku": draft["sku"],
+                "edit_link": edit_link(product_id),
+                "variations": {**state.get("variations", {}), **variations},
+            }
+        )
+        save_json(key_dir / "state.json", state)
+
+    final_status = None
     if not variable:
         if existing and not update:
             product, action = existing, "skipped"
@@ -795,6 +861,7 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
             product, action = wc.update_product(existing["id"], {**content_payload(), **_price_fields(draft)}), "updated"
         else:
             product, action = wc.create_product({**content_payload(), **_price_fields(draft)}), "created"
+        remember(product["id"], {})
         verb = {"created": "Đã tạo", "updated": "Đã cập nhật", "skipped": "Giữ nguyên"}[action]
         reporter.log("publish", f"{verb} sản phẩm #{product['id']}")
     else:
@@ -815,18 +882,24 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
             else:
                 product, action = existing, "skipped"
         else:
+            # Created as a draft and switched to the requested status only
+            # after every variation exists, so shoppers never see an empty product.
             payload = content_payload()
+            final_status = payload["status"]
+            payload["status"] = "draft"
             payload["attributes"] = [{"name": VARIATION_ATTRIBUTE_NAME, "options": labels, "visible": True, "variation": True}]
             payload["default_attributes"] = [{"name": VARIATION_ATTRIBUTE_NAME, "option": labels[0]}]
             product, action = wc.create_product(payload), "created"
-            reporter.log("publish", f"Đã tạo sản phẩm cha #{product['id']}")
+            reporter.log("publish", f"Đã tạo sản phẩm cha #{product['id']} (tạm ở trạng thái nháp)")
+        remember(product["id"], {})
 
     variations_result = []
     for i, v in enumerate(draft["variants"], start=1):
-        reporter.check_cancelled()
         found = existing_variation(v)
         if found and not update:
             var, var_action = found, "skipped"
+            regular = _to_int(found.get("regular_price"), 0) or None
+            sale = _to_int(found.get("sale_price"), 0) or None
         else:
             payload = {
                 "sku": v["sku"],
@@ -842,18 +915,31 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
                 var, var_action = wc.create_variation(product["id"], payload), "created"
                 if action == "skipped":
                     action = "extended"
+            regular, sale = v["regular_price"], v["sale_price"]
+        remember(product["id"], {v["sku"]: var["id"]})
         verb = {"created": "Đã tạo", "updated": "Đã cập nhật", "skipped": "Giữ nguyên"}[var_action]
-        reporter.log("publish", f"{verb} phiên bản '{v['label']}' (#{var['id']}) · {vnd(v['regular_price'])}")
+        reporter.log("publish", f"{verb} phiên bản '{v['label']}' (#{var['id']})" + (f" · {vnd(regular)}" if regular else ""))
         variations_result.append(
             {"label": v["label"], "sku": v["sku"], "id": var["id"], "action": var_action,
-             "regular_price": v["regular_price"], "sale_price": v["sale_price"]}
+             "regular_price": regular, "sale_price": sale}
         )
         reporter.progress("publish", i, len(draft["variants"]))
+
+    if final_status and final_status != "draft":
+        product = wc.update_product(product["id"], {"status": final_status})
+        reporter.log("publish", f"Đã chuyển sản phẩm sang trạng thái '{final_status}'")
 
     thumb = media.get(draft["images"][0], {}).get("url", "")
     if not thumb and product.get("images"):
         thumb = product["images"][0].get("src", "")
-    prices = [v["regular_price"] for v in draft["variants"]] or [draft["regular_price"]]
+    if variable:
+        regular_prices = [x["regular_price"] for x in variations_result if x["regular_price"]]
+        sale_price = None
+    elif action == "skipped":
+        regular_prices = [_to_int(product.get("regular_price"), 0)] if product.get("regular_price") else []
+        sale_price = _to_int(product.get("sale_price"), 0) or None
+    else:
+        regular_prices, sale_price = [draft["regular_price"]], draft["sale_price"]
     result = {
         "action": action,
         "product_id": product["id"],
@@ -864,23 +950,13 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
         "permalink": product.get("permalink", ""),
         "edit_link": edit_link(product["id"]),
         "thumb_url": thumb,
-        "price_min": min(prices),
-        "price_max": max(prices),
-        "sale_price": draft.get("sale_price") if not variable else None,
+        "price_min": min(regular_prices) if regular_prices else None,
+        "price_max": max(regular_prices) if regular_prices else None,
+        "sale_price": sale_price,
         "variations": variations_result,
         "source_urls": draft["source_urls"],
     }
-    state.update(
-        {
-            "product_id": product["id"],
-            "kind": draft["kind"],
-            "sku": draft["sku"],
-            "permalink": result["permalink"],
-            "edit_link": result["edit_link"],
-            "variations": {**state.get("variations", {}), **{v["sku"]: v["id"] for v in variations_result}},
-            "published_at": int(time.time()),
-        }
-    )
+    state.update({"permalink": result["permalink"], "published_at": int(time.time())})
     save_json(key_dir / "state.json", state)
     reporter.stage("publish", "done")
     return result

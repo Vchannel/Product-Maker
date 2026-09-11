@@ -1,6 +1,6 @@
 // Reusable form widgets: category picker, tag input, rich text editor,
 // editable string list, and VND price input.
-import { api, h, icon, render, clear, fmtNum, parseNum } from "./core.js";
+import { api, h, icon, render, clear, fmtNum, parseNum, sanitizeHtml, setSafeHtml } from "./core.js";
 
 // ---------------------------------------------------------------- categories
 let categoriesPromise = null;
@@ -14,7 +14,7 @@ export function loadCategories(refresh = false) {
   return categoriesPromise;
 }
 
-const norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d").toLowerCase();
+const norm = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\u0111/gi, "d").toLowerCase();
 
 export function categoryPicker(container, initial = [], onChange = () => {}) {
   let selected = initial.map((c) => ({ id: c.id ?? null, name: c.name || "", path: c.path || c.name || "" }));
@@ -137,7 +137,7 @@ export function tagInput(container, initial = [], onChange = () => {}) {
 export function richEditor(container, html, onChange = () => {}, { tall = false, compact = false } = {}) {
   let sourceMode = false;
   const area = h("div", { class: `editor-area prose ${tall ? "tall" : ""}`, contenteditable: "true", spellcheck: "true" });
-  area.innerHTML = html || "";
+  setSafeHtml(area, html);
   const source = h("textarea", { class: "textarea editor-source", spellcheck: "false", hidden: true });
 
   const exec = (cmd, value = null) => {
@@ -176,7 +176,7 @@ export function richEditor(container, html, onChange = () => {}, { tall = false,
     sourceMode = on;
     toggleSource.classList.toggle("on", on);
     if (on) { source.value = prettyHtml(area.innerHTML); source.style.height = Math.max(280, area.offsetHeight) + "px"; }
-    else area.innerHTML = source.value;
+    else setSafeHtml(area, source.value);
     area.hidden = on;
     source.hidden = !on;
     [...toolbar.querySelectorAll("button")].forEach((b) => { if (b !== toggleSource) b.disabled = on; });
@@ -194,7 +194,7 @@ export function richEditor(container, html, onChange = () => {}, { tall = false,
 
   return {
     get value() { return value(); },
-    set value(v) { area.innerHTML = v || ""; if (sourceMode) source.value = prettyHtml(v || ""); },
+    set value(v) { setSafeHtml(area, v); if (sourceMode) source.value = prettyHtml(sanitizeHtml(v)); },
   };
 }
 
@@ -203,9 +203,9 @@ function prettyHtml(html) {
 }
 
 export function textLength(html) {
-  const d = document.createElement("div");
-  d.innerHTML = html || "";
-  return (d.textContent || "").trim().length;
+  // Inert document: counting characters must never load images or run handlers.
+  const body = new DOMParser().parseFromString(`<body>${html || ""}</body>`, "text/html").body;
+  return (body.textContent || "").trim().length;
 }
 
 // ---------------------------------------------------------------- string list

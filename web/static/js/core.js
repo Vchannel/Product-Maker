@@ -40,7 +40,6 @@ export function h(tag, attrs, ...children) {
       else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
       else if (k === "dataset") Object.assign(el.dataset, v);
       else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v);
-      else if (k === "html") el.innerHTML = v; // only ever used with sanitized/own markup
       else if (v === true) el.setAttribute(k, "");
       else el.setAttribute(k, v);
     }
@@ -240,6 +239,46 @@ export function thumbImg(src, cls = "thumb") {
   const img = h("img", { class: cls, src, alt: "", loading: "lazy" });
   img.addEventListener("error", () => img.replaceWith(h("div", { class: `${cls} thumb-empty` }, icon("image"))), { once: true });
   return img;
+}
+
+// Same allowlist as lib/html_utils.sanitize_html. Parsing happens in an inert
+// DOMParser document (no scripts run, no images load), and only allowed
+// elements/attributes are copied into the output.
+const ALLOWED_TAGS = new Set(["P", "BR", "H2", "H3", "H4", "STRONG", "B", "EM", "I", "U", "UL", "OL", "LI", "A", "BLOCKQUOTE", "TABLE", "THEAD", "TBODY", "TR", "TD", "TH", "IMG", "SPAN"]);
+const ALLOWED_ATTRS = { A: ["href", "title", "target", "rel"], IMG: ["src", "alt", "width", "height"], TD: ["colspan", "rowspan"], TH: ["colspan", "rowspan"], TABLE: ["class"] };
+const DROP_TAGS = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "FORM", "INPUT", "BUTTON", "SVG", "NOSCRIPT", "TEMPLATE"]);
+const safeUrl = (u) => /^(https?:\/\/|\/(?!\/)|#|mailto:)/i.test(String(u || "").trim());
+
+export function sanitizeHtml(html) {
+  const src = new DOMParser().parseFromString(`<body>${html || ""}</body>`, "text/html").body;
+  const out = document.createElement("div");
+  const copy = (from, to) => {
+    for (const node of from.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) { to.appendChild(document.createTextNode(node.nodeValue)); continue; }
+      if (node.nodeType !== Node.ELEMENT_NODE) continue; // comments, CDATA, PIs
+      const tag = node.tagName.toUpperCase();
+      if (DROP_TAGS.has(tag)) continue;
+      const name = tag === "DIV" ? "P" : tag;
+      if (!ALLOWED_TAGS.has(name)) { copy(node, to); continue; }
+      const el = document.createElement(name);
+      for (const attr of ALLOWED_ATTRS[name] || []) {
+        const v = node.getAttribute(attr);
+        if (v === null) continue;
+        if ((attr === "href" || attr === "src") && !safeUrl(v)) continue;
+        el.setAttribute(attr, v);
+      }
+      if (name === "A" && el.getAttribute("target") === "_blank") el.setAttribute("rel", "noopener");
+      copy(node, el);
+      to.appendChild(el);
+    }
+  };
+  copy(src, out);
+  return out.innerHTML;
+}
+
+export function setSafeHtml(el, html) {
+  el.innerHTML = sanitizeHtml(html);
+  return el;
 }
 
 export function mediaUrl(ref, original = false) {

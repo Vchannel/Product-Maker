@@ -104,3 +104,8 @@ def test_interleave_images_quotes_alt():
     html = interleave_images("<p>1</p><p>2</p><p>3</p>", ["https://x/a.png"], 'He said "hi"')
     assert 'alt="He said &quot;hi&quot;"' in html
     assert html.startswith("<p>1</p>")
+
+
+def test_sanitize_html_drops_cdata_and_comments():
+    dirty = "<p>a</p><![CDATA[ x><img src=x onerror=alert(1)> ]]><!-- <script>x</script> -->"
+    assert sanitize_html(dirty) == "<p>a</p>"

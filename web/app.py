@@ -356,7 +356,10 @@ def create_app(start_worker: bool = True) -> Flask:
         if job["status"] not in ("review", "failed", "cancelled"):
             raise ApiError("Phiên này không còn ở bước chỉnh sửa.", 409)
         draft = pipeline.normalize_draft(_json_body().get("draft"))
-        db.update_job(job_id, draft=draft, title=draft["title"], thumb=draft["images"][0])
+        # Conditional on status so a late autosave can't change a draft that is
+        # already queued for publishing.
+        if not db.transition(job_id, ("review", "failed", "cancelled"), draft=draft, title=draft["title"], thumb=draft["images"][0]):
+            raise ApiError("Phiên này không còn ở bước chỉnh sửa.", 409)
         return jsonify({"ok": True, "draft": draft, "saved_at": time.time()})
 
     @app.post("/api/jobs/<job_id>/publish")
@@ -367,7 +370,8 @@ def create_app(start_worker: bool = True) -> Flask:
         if settings.missing_keys():
             raise ApiError("Chưa cấu hình đủ kết nối tới website - vào Cài đặt.", 409)
         draft = pipeline.normalize_draft(_json_body().get("draft") or job.get("draft"))
-        jobs.approve(job_id, draft)
+        if not jobs.approve(job_id, draft):
+            raise ApiError("Phiên này vừa được thay đổi ở nơi khác - tải lại trang.", 409)
         return jsonify({"ok": True})
 
     @app.post("/api/jobs/<job_id>/retry")
@@ -375,7 +379,8 @@ def create_app(start_worker: bool = True) -> Flask:
         job = _get_job_or_404(job_id)
         if job["status"] not in ("failed", "cancelled"):
             raise ApiError("Chỉ thử lại được phiên bị lỗi hoặc đã huỷ.", 409)
-        jobs.retry(job_id)
+        if not jobs.retry(job_id):
+            raise ApiError("Phiên này vừa được thay đổi ở nơi khác - tải lại trang.", 409)
         return jsonify({"ok": True})
 
     @app.post("/api/jobs/<job_id>/reopen")
@@ -383,7 +388,8 @@ def create_app(start_worker: bool = True) -> Flask:
         job = _get_job_or_404(job_id)
         if job["status"] not in ("failed", "cancelled") or not job.get("draft"):
             raise ApiError("Phiên này chưa có bản nháp để mở lại.", 409)
-        jobs.reopen(job_id)
+        if not jobs.reopen(job_id):
+            raise ApiError("Phiên này vừa được thay đổi ở nơi khác - tải lại trang.", 409)
         return jsonify({"ok": True})
 
     @app.post("/api/jobs/<job_id>/regenerate")
@@ -391,14 +397,17 @@ def create_app(start_worker: bool = True) -> Flask:
         job = _get_job_or_404(job_id)
         if job["status"] not in ("review", "failed", "cancelled"):
             raise ApiError("Không thể viết lại khi phiên đang chạy.", 409)
-        jobs.regenerate(job_id)
+        if not jobs.regenerate(job_id):
+            raise ApiError("Phiên này vừa được thay đổi ở nơi khác - tải lại trang.", 409)
         return jsonify({"ok": True})
 
     @app.post("/api/jobs/<job_id>/cancel")
     def api_cancel(job_id):
         _get_job_or_404(job_id)
-        jobs.cancel(job_id)
-        return jsonify({"ok": True})
+        outcome = jobs.cancel(job_id)
+        if not outcome:
+            raise ApiError("Phiên này đã kết thúc, không thể huỷ.", 409)
+        return jsonify({"ok": True, "outcome": outcome})
 
     @app.delete("/api/jobs/<job_id>")
     def api_delete_job(job_id):
@@ -473,6 +482,13 @@ def create_app(start_worker: bool = True) -> Flask:
             raise ApiError("Địa chỉ website phải bắt đầu bằng https://")
         if values.get("WC_PRODUCT_STATUS") and values["WC_PRODUCT_STATUS"] not in {s for s, _ in settings.STATUS_CHOICES}:
             raise ApiError("Trạng thái mặc định không hợp lệ.")
+        new_site = str(values.get("WP_SITE_URL") or "").strip().rstrip("/")
+        if new_site and new_site != pipeline.site_url() and pipeline.site_url():
+            # Never send saved store credentials to a different host without the
+            # user typing them again.
+            needed = ["WC_CONSUMER_KEY", "WC_CONSUMER_SECRET", "WP_APP_PASSWORD"]
+            if not all(str(values.get(k) or "").strip() for k in needed):
+                raise ApiError("Khi đổi địa chỉ website, hãy nhập lại Consumer Key, Consumer Secret và Application Password.")
         settings.save(values)
         categories_cache.update(at=0.0, items=None)
         return jsonify({"values": settings.public_view(), "missing": settings.missing_keys()})

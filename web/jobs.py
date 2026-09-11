@@ -99,56 +99,81 @@ class JobManager:
         self.queue.put((job_id, "prepare"))
         return job_id
 
-    def approve(self, job_id: str, draft: dict) -> None:
-        self.db.update_job(job_id, draft=draft, status="queued", phase="publish", error=None)
+    # Every command is a conditional status transition, so a click that races
+    # with the worker (or another tab) can't resurrect or double-run a job.
+    def approve(self, job_id: str, draft: dict) -> bool:
+        if not self.db.transition(job_id, ("review",), draft=draft, status="queued", phase="publish", error=None):
+            return False
+        self.cancel_requested.discard(job_id)
         self.queue.put((job_id, "publish"))
+        return True
 
-    def retry(self, job_id: str) -> None:
+    def retry(self, job_id: str) -> bool:
         job = self.db.get_job(job_id)
+        if not job:
+            return False
         phase = job["phase"]
         if phase == "publish" and not job.get("draft"):
             phase = "prepare"
+        if not self.db.transition(job_id, ("failed", "cancelled"), status="queued", phase=phase, error=None):
+            return False
         self.cancel_requested.discard(job_id)
-        self.db.update_job(job_id, status="queued", phase=phase, error=None)
         self.queue.put((job_id, phase))
+        return True
 
-    def reopen(self, job_id: str) -> None:
+    def reopen(self, job_id: str) -> bool:
         """Back to the review step with the saved draft (no automatic publish)."""
         job = self.db.get_job(job_id)
+        if not job or not job.get("draft"):
+            return False
         stages = job.get("stages") or {}
         for key in ("upload", "publish"):
             stages.pop(key, None)
         stages["review"] = {"status": "running", "detail": "chờ bạn duyệt", "at": time.time()}
-        self.db.update_job(job_id, status="review", phase="publish", error=None, stages=stages)
+        return self.db.transition(job_id, ("failed", "cancelled"), status="review", phase="publish", error=None, stages=stages)
 
-    def regenerate(self, job_id: str) -> None:
-        job = self.db.get_job(job_id)
-        options = dict(job["options"])
-        options["force_rewrite"] = True
-        self.db.update_job(job_id, options=options, status="queued", phase="prepare", error=None, stages={})
-        self.queue.put((job_id, "prepare"))
-
-    def cancel(self, job_id: str) -> None:
+    def regenerate(self, job_id: str) -> bool:
         job = self.db.get_job(job_id)
         if not job:
-            return
-        if job["status"] == "queued":
-            self.db.update_job(job_id, status="cancelled", error="Đã huỷ trước khi chạy.")
-        elif job["status"] == "running":
+            return False
+        options = dict(job["options"])
+        options["force_rewrite"] = True
+        if not self.db.transition(
+            job_id, ("review", "failed", "cancelled"), options=options, status="queued", phase="prepare", error=None, stages={}
+        ):
+            return False
+        self.cancel_requested.discard(job_id)
+        self.queue.put((job_id, "prepare"))
+        return True
+
+    def cancel(self, job_id: str) -> str:
+        """Returns 'cancelled', 'stopping' (running job will stop at the next
+        safe point) or '' when the job can no longer be cancelled."""
+        if self.db.transition(job_id, ("queued",), status="cancelled", error="Đã huỷ trước khi chạy."):
+            return "cancelled"
+        if self.db.transition(job_id, ("review",), status="cancelled", error="Đã huỷ ở bước duyệt."):
+            return "cancelled"
+        job = self.db.get_job(job_id)
+        if job and job["status"] == "running":
             self.cancel_requested.add(job_id)
-        elif job["status"] == "review":
-            self.db.update_job(job_id, status="cancelled", error="Đã huỷ ở bước duyệt.")
+            still = self.db.get_job(job_id)
+            if still and still["status"] == "running":
+                return "stopping"
+            self.cancel_requested.discard(job_id)
+        return ""
 
     # --- worker -------------------------------------------------------------------
     def _loop(self) -> None:
         while True:
             job_id, phase = self.queue.get()
             try:
-                job = self.db.get_job(job_id)
-                if not job or job["status"] != "queued" or job["phase"] != phase:
-                    continue  # cancelled/deleted/superseded while waiting
+                # Claim the job atomically; skip it if it was cancelled, deleted
+                # or re-queued for another phase while waiting.
+                self.cancel_requested.discard(job_id)
+                if not self.db.transition(job_id, ("queued",), phase=phase, status="running", error=None):
+                    continue
                 self.current = job_id
-                self._run(job, phase)
+                self._run(self.db.get_job(job_id), phase)
             finally:
                 self.current = ""
                 self.cancel_requested.discard(job_id)
@@ -156,7 +181,6 @@ class JobManager:
 
     def _run(self, job: dict, phase: str) -> None:
         job_id = job["id"]
-        self.db.update_job(job_id, status="running", error=None)
         reporter = JobReporter(self, job_id)
         try:
             if phase == "prepare":
@@ -190,6 +214,7 @@ class JobManager:
         opts.pop("force_rewrite", None)
         self.db.update_job(job["id"], options=opts)
 
+        reporter.check_cancelled()
         if job["options"].get("review", True):
             reporter.stage("review", "running", "chờ bạn duyệt")
             self.db.update_job(job["id"], status="review", phase="publish")

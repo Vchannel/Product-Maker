@@ -114,10 +114,9 @@ def remove_logo(src_path: str, dest_path: str) -> LogoResult:
         if result.removed:
             if im.mode not in ("RGB", "RGBA"):
                 out = im.convert("RGBA" if "transparency" in im.info or im.mode in ("LA", "P") else "RGB")
-            bg = np.asarray(out.convert("RGB"))[2:12, -12:].reshape(-1, 3).mean(axis=0)
-            fill = tuple(int(c) for c in bg)
-            if out.mode == "RGBA":
-                fill = fill + (255,)
+            bands = len(out.getbands())
+            bg = np.asarray(out)[2:12, -12:].reshape(-1, bands).mean(axis=0)
+            fill = tuple(int(round(c)) for c in bg)
             ImageDraw.Draw(out).rectangle(result.box, fill=fill)
         save_kwargs = {}
         if (fmt or "").upper() == "JPEG":

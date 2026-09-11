@@ -115,3 +115,29 @@ def test_settings_save_keeps_secrets_when_blank(client, isolated):
     assert settings.default_discount() == 60000
     env = (isolated / ".env").read_text()
     assert "PRICE_DISCOUNT_VND" in env and "ANTHROPIC_API_KEY" not in env
+
+
+def test_commands_are_conditional_on_status(client, store):
+    url = seed_product("mini-4", "DJI Mini 4", 20000000)
+    job_id = client.post("/api/jobs", json={"urls": [url], "options": {}}, headers=H).get_json()["id"]
+    job = wait_for(client, job_id, {"review", "failed"})
+    assert job["status"] == "review"
+    assert client.post(f"/api/jobs/{job_id}/retry", json={}, headers=H).status_code == 409
+    assert client.post(f"/api/jobs/{job_id}/cancel", json={}, headers=H).get_json()["outcome"] == "cancelled"
+    # autosave after cancel is still allowed (draft kept), publish is not
+    assert client.put(f"/api/jobs/{job_id}/draft", json={"draft": job["draft"]}, headers=H).status_code == 200
+    assert client.post(f"/api/jobs/{job_id}/publish", json={}, headers=H).status_code == 409
+    assert client.post(f"/api/jobs/{job_id}/reopen", json={}, headers=H).status_code == 200
+    assert client.post(f"/api/jobs/{job_id}/publish", json={}, headers=H).status_code == 200
+    job = wait_for(client, job_id, {"done", "failed"})
+    assert job["status"] == "done", job.get("error")
+    assert client.post(f"/api/jobs/{job_id}/cancel", json={}, headers=H).status_code == 409
+    assert client.put(f"/api/jobs/{job_id}/draft", json={"draft": job["draft"]}, headers=H).status_code == 409
+
+
+def test_changing_site_requires_secrets(client):
+    res = client.put("/api/settings", json={"values": {"WP_SITE_URL": "https://attacker.example"}}, headers=H)
+    assert res.status_code == 400
+    from lib import settings
+
+    assert settings.get("WP_SITE_URL") == "https://shop.test"

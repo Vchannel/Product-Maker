@@ -1,7 +1,7 @@
 import { $, api, h, icon, render, fmtVND, timeAgo, fmtDate, kindBadge, productStatusBadge, thumbImg, emptyState, toast, toastError, withLoading, debounce, copyText } from "./core.js";
 
 let items = [];
-const norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d").toLowerCase();
+const norm = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\u0111/gi, "d").toLowerCase();
 
 function filtered() {
   const q = norm($("#q").value.trim());
