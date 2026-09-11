@@ -109,3 +109,26 @@ def test_interleave_images_quotes_alt():
 def test_sanitize_html_drops_cdata_and_comments():
     dirty = "<p>a</p><![CDATA[ x><img src=x onerror=alert(1)> ]]><!-- <script>x</script> -->"
     assert sanitize_html(dirty) == "<p>a</p>"
+
+
+def _white_ratio(path, box):
+    a = np.asarray(Image.open(path).convert("RGB")).astype(int)
+    x0, y0, x1, y1 = box
+    return (a[y0:y1, x0:x1].min(axis=2) > 235).mean()
+
+
+def test_real_logo_removed_when_accessory_touches_it(tmp_path):
+    # Half-size flycampro photos where a selfie stick / lens cover touches the
+    # logo - the cluster detector used to skip these and leave the logo.
+    for name, product_box in [("logo_touching_stick.jpg", (110, 85, 135, 190)), ("logo_touching_cover.jpg", (130, 90, 170, 140))]:
+        src, out = FIXTURES / name, tmp_path / name
+        result = remove_logo(str(src), str(out))
+        assert result.removed and result.method == "template", name
+        # Logo emblem + lettering (left of the product) is now plain background.
+        assert _white_ratio(out, (32, 38, 105, 108)) > 0.98, name
+        assert _white_ratio(src, (32, 38, 105, 108)) < 0.8, name
+        # The touching accessory is still there.
+        before = np.asarray(Image.open(src).convert("L")).astype(int)
+        after = np.asarray(Image.open(out).convert("L")).astype(int)
+        x0, y0, x1, y1 = product_box
+        assert np.abs(after[y0 + 40 : y1, x0:x1] - before[y0 + 40 : y1, x0:x1]).mean() < 6, name

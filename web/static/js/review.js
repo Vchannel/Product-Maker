@@ -50,6 +50,7 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
   }
   const saveLater = debounce(save, 1200);
   function changed() {
+    if (variable) markDefaultVariant();
     editsSinceSave++;
     state.dirty = true;
     state.error = "";
@@ -228,9 +229,20 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
     pricingCard = h("section", { class: "card" },
       h("div", { class: "card-head" }, h("h2", null, icon("layers"), `Phiên bản (${draft.variants.length})`), h("span", { class: "hint" }, "Khách chọn ở thuộc tính “Phiên bản”")),
       h("div", { class: "card-body" }, draft.variants.map((v) => variantBlock(v))));
+    markDefaultVariant();
+  }
+
+  const defaultBadges = new Map();
+  function markDefaultVariant() {
+    // Mirrors pipeline.cheapest_label: the cheapest option is pre-selected on the store.
+    const price = (x) => x.sale_price || x.regular_price || Infinity;
+    const cheapest = draft.variants.reduce((best, x) => (price(x) < price(best) ? x : best), draft.variants[0]);
+    for (const [v, badge] of defaultBadges) badge.hidden = v !== cheapest;
   }
 
   function variantBlock(v) {
+    const defaultBadge = h("span", { class: "badge accent", title: "Được chọn sẵn trên trang sản phẩm vì có giá thấp nhất", hidden: true }, icon("star"), "Mặc định");
+    defaultBadges.set(v, defaultBadge);
     const headImg = h("img", { src: mediaUrl(v.image), alt: "" });
     const headLabel = h("div", { class: "strong ellipsis" }, v.label);
     const labelInput = h("input", { class: "input", value: v.label });
@@ -253,6 +265,7 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
       h("div", { class: "variant-head" }, headImg,
         h("div", { class: "grow", style: { minWidth: 0 } }, headLabel,
           h("a", { class: "tiny faint ellipsis", href: v.source_url, target: "_blank", rel: "noopener", style: { display: "block" } }, v.source_title)),
+        defaultBadge,
         h("span", { class: "badge outline num" }, fmtVND(v.regular_price))),
       h("div", { class: "variant-body" },
         h("div", { class: "grid grid-2", style: { gap: "12px" } },

@@ -125,8 +125,12 @@ def test_legacy_cache_formats_are_read(fake_ai, store):
     (d / "box_description.json").write_text('{"html": "<p><strong>Trong hộp có gì:</strong></p><ul><li>Túi</li><li>Dây</li></ul>"}', encoding="utf-8")
     (d / "state.json").write_text('{"wc_product_id": 555, "wc_product_link": "x"}', encoding="utf-8")
     draft = pipeline.prepare([url], options())
-    assert draft["box_items"] == ["Túi", "Dây"]
-    assert fake_ai.box_calls == 0
+    # Old box caches don't record the flat-lay photo, so vision runs once more
+    # and the new format is cached from then on.
+    assert fake_ai.box_calls == 1
+    assert draft["box_items"] == ["Túi đựng", "Cáp USB-C"]
+    pipeline.prepare([url], options())
+    assert fake_ai.box_calls == 1
 
 
 def test_variation_sku_clash_is_caught_before_any_write(fake_ai, store):
@@ -199,3 +203,22 @@ def test_draft_key_and_image_paths_are_validated(fake_ai, store):
     for ref in ["../safe/x.png", "./images/x.png", "safe/../raw.json"]:
         with pytest.raises(pipeline.DraftError):
             pipeline.resolve_image(ref)
+
+
+def test_variant_image_is_flatlay_and_cheapest_option_is_default(fake_ai, store):
+    std = seed_product("dji-osmo-360-ii-standard-combo", "DJI Osmo 360 II Standard Combo", 13860000)
+    adv = seed_product("dji-osmo-360-ii-adventure-combo", "DJI Osmo 360 II Adventure Combo", 16650000)
+    ride = seed_product("dji-osmo-360-ii-limitless-riding-combo", "DJI Osmo 360 II Limitless Riding Combo", 14650000)
+    draft = pipeline.prepare([adv, ride, std], options())
+    assert [v["label"] for v in draft["variants"]] == ["Adventure Combo", "Limitless Riding Combo", "Standard Combo"]
+    for v in draft["variants"]:
+        assert v["image"] == f"{v['slug']}/{v['slug']}-02.png", "combo image = photo of everything in its box"
+
+    result = pipeline.publish(draft)
+    parent = store.products[result["product_id"]]
+    assert parent["default_attributes"] == [{"name": pipeline.VARIATION_ATTRIBUTE_NAME, "option": "Standard Combo"}]
+    by_label = {v["attributes"][0]["option"]: v for v in store.variations[parent["id"]].values()}
+    assert by_label["Standard Combo"]["sale_price"] == "13815000"
+    images = {m["id"]: m["source_url"] for m in store.media.values()}
+    for label, var in by_label.items():
+        assert images[var["image"]["id"]].endswith("-02.png"), label

@@ -128,6 +128,12 @@ def sale_price_for(regular: int, discount: int) -> Optional[int]:
     return regular - discount if 0 < discount < regular else None
 
 
+def cheapest_label(variants: list) -> str:
+    """Label of the variant with the lowest selling price (first one on ties) -
+    pre-selected on the product page so shoppers start from the entry price."""
+    return min(variants, key=lambda v: v.get("sale_price") or v["regular_price"])["label"]
+
+
 def split_common_prefix(titles: list) -> tuple:
     """["DJI Pocket 4 Creator Combo", "DJI Pocket 4 Standard Combo"] ->
     ("DJI Pocket 4", ["Creator Combo", "Standard Combo"])."""
@@ -321,26 +327,34 @@ def preview(urls: list, reporter: Optional[Reporter] = None) -> dict:
     return result
 
 
-def _box_items(product: ProductData, images: list, model: str, force: bool, reporter: Reporter) -> list:
+BOX_CACHE_VERSION = 2
+
+
+def _box_items(product: ProductData, images: list, model: str, force: bool, reporter: Reporter) -> tuple:
+    """(in-box accessory list, filename of the "everything in the box" photo or None)."""
     path = product_dir(product.slug) / "box_description.json"
     cached = None if force else load_json(path)
-    if cached is not None:
-        if "items" in cached:
-            return cached["items"]
-        if cached.get("html"):  # legacy cache format: an HTML <ul>
-            return [li.get_text(" ", strip=True) for li in BeautifulSoup(cached["html"], "html.parser").find_all("li")]
-        return []
-    reporter.log("content", f"AI đang đọc phụ kiện trong hộp của '{product.title}'")
-    items = describe_box_contents(
+    filenames = [img["filename"] for img in images]
+    if cached is not None and cached.get("v") == BOX_CACHE_VERSION:
+        flatlay = cached.get("flatlay")
+        return cached.get("items", []), flatlay if flatlay in filenames else None
+    # Older caches (a bare list or an HTML <ul>) don't know which photo is the
+    # flat-lay, so vision runs again once.
+    reporter.log("content", f"AI đang xem ảnh để đọc phụ kiện trong hộp của '{product.title}'")
+    found = describe_box_contents(
         make_client(),
         model,
         [img["path"] for img in images],
         product.box_image_urls,
         product.box_contents_text,
     )
-    save_json(path, {"items": items, "model": model})
-    reporter.log("content", f"Tìm thấy {len(items)} phụ kiện" if items else "Không xác định được phụ kiện trong hộp")
-    return items
+    index = found.get("flatlay_index")
+    flatlay = filenames[index] if isinstance(index, int) and 0 <= index < len(filenames) else None
+    items = found.get("items", [])
+    save_json(path, {"v": BOX_CACHE_VERSION, "items": items, "flatlay": flatlay, "model": model})
+    msg = f"Tìm thấy {len(items)} phụ kiện" if items else "Không xác định được phụ kiện trong hộp"
+    reporter.log("content", msg + (f" · ảnh bày phụ kiện: {flatlay}" if flatlay else ""))
+    return items, flatlay
 
 
 def _rewrite(key_dir: Path, title: str, product: ProductData, model: str, force: bool, reporter: Reporter,
@@ -429,12 +443,14 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
     group = plan_group(products)
     key_dir = settings.CACHE_DIR / group["key"]
     base = products[0]
-    box_by_slug = {}
+    box_by_slug, flatlay_by_slug = {}, {}
     if options.read_box:
         for p in products:
             reporter.check_cancelled()
             try:
-                box_by_slug[p.slug] = _box_items(p, images_by_slug[p.slug], model, options.force_rewrite, reporter)
+                box_by_slug[p.slug], flatlay_by_slug[p.slug] = _box_items(
+                    p, images_by_slug[p.slug], model, options.force_rewrite, reporter
+                )
             except RewriteError as e:
                 reporter.log("content", f"Bỏ qua bước đọc phụ kiện: {e}", "warn")
                 box_by_slug[p.slug] = []
@@ -506,7 +522,9 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
                 "regular_price": p.price_vnd,
                 "sale_price": sale_price_for(p.price_vnd, options.discount_vnd),
                 "box_items": box_by_slug.get(p.slug, []),
-                "image": image_id(p.slug, images_by_slug[p.slug][0]["filename"]),
+                # The combo's own image is the photo of everything in its box,
+                # so shoppers see what they get when they pick that option.
+                "image": image_id(p.slug, flatlay_by_slug.get(p.slug) or images_by_slug[p.slug][0]["filename"]),
             }
             for p, label in zip(products, group["labels"])
         ]
@@ -872,7 +890,14 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
             attributes = [a for a in existing.get("attributes", []) if a.get("name") != VARIATION_ATTRIBUTE_NAME]
             attributes.append({"name": VARIATION_ATTRIBUTE_NAME, "options": merged, "visible": True, "variation": True})
             if update:
-                product = wc.update_product(existing["id"], {**content_payload(), "attributes": attributes})
+                product = wc.update_product(
+                    existing["id"],
+                    {
+                        **content_payload(),
+                        "attributes": attributes,
+                        "default_attributes": [{"name": VARIATION_ATTRIBUTE_NAME, "option": cheapest_label(draft["variants"])}],
+                    },
+                )
                 action = "updated"
                 reporter.log("publish", f"Đã cập nhật sản phẩm #{product['id']}")
             elif current != merged:
@@ -888,7 +913,7 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
             final_status = payload["status"]
             payload["status"] = "draft"
             payload["attributes"] = [{"name": VARIATION_ATTRIBUTE_NAME, "options": labels, "visible": True, "variation": True}]
-            payload["default_attributes"] = [{"name": VARIATION_ATTRIBUTE_NAME, "option": labels[0]}]
+            payload["default_attributes"] = [{"name": VARIATION_ATTRIBUTE_NAME, "option": cheapest_label(draft["variants"])}]
             product, action = wc.create_product(payload), "created"
             reporter.log("publish", f"Đã tạo sản phẩm cha #{product['id']} (tạm ở trạng thái nháp)")
         remember(product["id"], {})

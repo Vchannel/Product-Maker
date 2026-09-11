@@ -97,7 +97,8 @@ class FakeAI:
 
     def box(self, client, model, image_paths, box_image_urls=(), box_text=""):
         self.box_calls += 1
-        return ["Túi đựng", "Cáp USB-C"]
+        # Like flycampro galleries: the 2nd photo shows everything in the box.
+        return {"items": ["Túi đựng", "Cáp USB-C"], "flatlay_index": 1 if len(image_paths) > 1 else None}
 
 
 @pytest.fixture

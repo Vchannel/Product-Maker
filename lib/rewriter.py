@@ -76,15 +76,18 @@ Cách liệt kê:
 liệt kê thân máy chính và không đoán số hiệu model - số hiệu đọc qua ảnh nhỏ rất dễ sai.
 - Khi không đọc rõ chi tiết, mô tả chung chung ("Cáp USB-C" thay vì đoán độ dài; "Túi đựng" thay vì đoán chất liệu). \
 Không ghi các phương án kiểu "A hoặc B".
-- Nếu không có ảnh nào thuộc hai loại trên, trả về found = false và danh sách rỗng."""
+- Nếu không có ảnh nào thuộc hai loại trên, trả về found = false và danh sách rỗng.
+
+Ngoài ra, chọn flatlay_image: số thứ tự N của ảnh gallery (nhãn "G<N>") chụp bày toàn bộ những gì khách nhận được trong hộp - thân máy cùng các phụ kiện xếp riêng từng món. Ảnh này sẽ làm ảnh đại diện cho combo, nên đừng chọn ảnh chỉ có thân máy hay ảnh infographic nhiều chữ nếu có ảnh flat-lay rõ hơn. Trả về 0 nếu gallery không có ảnh như vậy."""
 
 BOX_SCHEMA = {
     "type": "object",
     "properties": {
         "found": {"type": "boolean"},
         "items": {"type": "array", "items": {"type": "string"}},
+        "flatlay_image": {"type": "integer"},
     },
-    "required": ["found", "items"],
+    "required": ["found", "items", "flatlay_image"],
     "additionalProperties": False,
 }
 
@@ -213,29 +216,34 @@ def describe_box_contents(
     image_paths: list,
     box_image_urls: list = (),
     box_contents_text: str = "",
-) -> list:
-    """Return the list of in-box accessories ([] when nothing reliable found).
+) -> dict:
+    """Return {"items": [...in-box accessories...], "flatlay_index": int|None}.
 
-    box_image_urls are images from the page's "Trong hộp có gì" tab (often a
-    screenshot of the official list) and are shown to Claude first."""
+    items is [] when nothing reliable was found. flatlay_index is the 0-based
+    position in image_paths of the photo showing everything in the box (used
+    as the combo's own image). box_image_urls are images from the page's
+    "Trong hộp có gì" tab (often a screenshot of the official list) and are
+    shown to Claude first."""
     content = []
     n = 0
+    shown_gallery = 0
     for url in list(box_image_urls)[:3]:
         try:
             data = fetch_image_bytes(url)
         except ImageDownloadError:
             continue
         n += 1
-        content.append({"type": "text", "text": f"Ảnh {n} (tab 'Trong hộp có gì'):"})
+        content.append({"type": "text", "text": f"Ảnh T{n} (tab 'Trong hộp có gì'):"})
         content.append(_image_block(data))
     for path in image_paths:
         if n >= MAX_VISION_IMAGES:
             break
         n += 1
-        content.append({"type": "text", "text": f"Ảnh {n} (gallery sản phẩm):"})
+        shown_gallery += 1
+        content.append({"type": "text", "text": f"Ảnh G{shown_gallery} (gallery sản phẩm):"})
         content.append(_image_block(Path(path).read_bytes()))
     if n == 0:
-        return []
+        return {"items": [], "flatlay_index": None}
     if (box_contents_text or "").strip():
         content.append({"type": "text", "text": f"Văn bản 'Trong hộp có gì' trên trang:\n{box_contents_text.strip()}"})
     content.append({"type": "text", "text": "Liệt kê phụ kiện trong hộp."})
@@ -243,9 +251,10 @@ def describe_box_contents(
     data = _call_structured(
         client, model, BOX_SYSTEM_PROMPT, content, BOX_SCHEMA, max_tokens=4000, what="đọc phụ kiện trong hộp"
     )
-    if not data.get("found"):
-        return []
-    return [str(i).strip() for i in data.get("items", []) if str(i).strip()]
+    flatlay = data.get("flatlay_image")
+    flatlay_index = flatlay - 1 if isinstance(flatlay, int) and 1 <= flatlay <= shown_gallery else None
+    items = [str(i).strip() for i in data.get("items", []) if str(i).strip()] if data.get("found") else []
+    return {"items": items, "flatlay_index": flatlay_index}
 
 
 def check_api(api_key: str, model: str) -> str:
