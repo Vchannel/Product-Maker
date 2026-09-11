@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "flycampro-webapp",
+      "runtimeExecutable": "C:\\Users\\vchannel\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "runtimeArgs": ["webapp.py"],
+      "port": 5000
+    }
+  ]
+}
