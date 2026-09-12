@@ -138,6 +138,7 @@ class JobManager:
             return False
         options = dict(job["options"])
         options["force_rewrite"] = True
+        options["regenerate"] = True  # merge the new AI text into the edited draft
         if not self.db.transition(
             job_id, ("review", "failed", "cancelled"), options=options, status="queued", phase="prepare", error=None, stages={}
         ):
@@ -206,12 +207,16 @@ class JobManager:
         for key in ("review", "upload", "publish"):
             reporter.stages.pop(key, None)
         draft = pipeline.prepare(job["urls"], options, reporter)
+        if job["options"].get("regenerate") and job.get("draft"):
+            draft = pipeline.merge_regenerated(job["draft"], draft)
+            reporter.log("content", "Đã thay tên, mô tả và phụ kiện bằng bản AI mới; giữ nguyên ảnh, giá, phiên bản, danh mục.")
         thumb = draft["images"][0] if draft["images"] else None
         self.db.update_job(job["id"], draft=draft, kind=draft["kind"], title=draft["title"], thumb=thumb)
         # Options that only mattered for this run shouldn't stick for retries.
         opts = dict(job["options"])
         opts.pop("force_scrape", None)
         opts.pop("force_rewrite", None)
+        opts.pop("regenerate", None)
         self.db.update_job(job["id"], options=opts)
 
         reporter.check_cancelled()

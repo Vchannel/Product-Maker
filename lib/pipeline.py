@@ -51,6 +51,7 @@ STAGES = [
 ]
 
 PIPELINE_ERRORS = (ScrapeError, ImageDownloadError, RewriteError, WooCommerceAPIError)
+PRICE_MISSING_NOTE = "Có sản phẩm flycampro không hiển thị giá (Liên hệ/Hết hàng) - bạn sẽ nhập giá ở bước duyệt."
 
 
 class Cancelled(Exception):
@@ -286,13 +287,16 @@ def plan_group(products: list) -> dict:
     """How a set of scraped products will be imported (for previews)."""
     if len(products) == 1:
         p = products[0]
-        return {"kind": "simple", "title": p.title, "labels": [], "key": p.slug, "sku": make_sku(p.slug), "warning": ""}
+        return {"kind": "simple", "title": p.title, "labels": [], "key": p.slug, "sku": make_sku(p.slug),
+                "warning": PRICE_MISSING_NOTE if not p.price_vnd else ""}
     common, labels = split_common_prefix([p.title for p in products])
     warning = ""
     if len(common.split()) < 2:
         warning = "Tiêu đề các link không có phần chung rõ ràng - kiểm tra lại có đúng là cùng một sản phẩm không."
     if len({l.lower() for l in labels}) != len(labels):
         warning = "Có hai link cho ra cùng tên phiên bản - có thể bạn dán trùng sản phẩm."
+    if any(not p.price_vnd for p in products):
+        warning = f"{warning} {PRICE_MISSING_NOTE}".strip()
     title = common or products[0].title
     parent_slug = slugify(title)
     return {
@@ -327,7 +331,7 @@ def preview(urls: list, reporter: Optional[Reporter] = None) -> dict:
     return result
 
 
-BOX_CACHE_VERSION = 3
+BOX_CACHE_VERSION = 4
 
 
 def _box_items(product: ProductData, images: list, model: str, force: bool, reporter: Reporter) -> tuple:
@@ -336,9 +340,13 @@ def _box_items(product: ProductData, images: list, model: str, force: bool, repo
     path = product_dir(product.slug) / "box_description.json"
     cached = None if force else load_json(path)
     filenames = [img["filename"] for img in images]
-    if cached is not None and cached.get("v") == BOX_CACHE_VERSION:
-        flatlay, hero = cached.get("flatlay"), cached.get("hero")
-        return cached.get("items", []), flatlay if flatlay in filenames else None, hero if hero in filenames else None
+    # Photos are identified by the downloaded file's hash: file names follow
+    # gallery position, so a reordered flycampro gallery would otherwise map a
+    # cached choice onto the wrong photo.
+    by_source = {img["source_sha1"]: img["filename"] for img in images}
+    photos = sorted(by_source)
+    if cached is not None and cached.get("v") == BOX_CACHE_VERSION and cached.get("photos") == photos:
+        return cached.get("items", []), by_source.get(cached.get("flatlay_sha1")), by_source.get(cached.get("hero_sha1"))
     # Older caches don't know which photos are the flat-lay / plain hero shot,
     # so vision runs again once.
     reporter.log("content", f"AI đang xem ảnh để đọc phụ kiện trong hộp của '{product.title}'")
@@ -350,11 +358,25 @@ def _box_items(product: ProductData, images: list, model: str, force: bool, repo
         product.box_contents_text,
     )
     def pick(index):
-        return filenames[index] if isinstance(index, int) and 0 <= index < len(filenames) else None
+        return images[index] if isinstance(index, int) and 0 <= index < len(filenames) else None
 
-    flatlay, hero = pick(found.get("flatlay_index")), pick(found.get("hero_index"))
+    flat_img, hero_img = pick(found.get("flatlay_index")), pick(found.get("hero_index"))
+    flatlay = flat_img["filename"] if flat_img else None
+    hero = hero_img["filename"] if hero_img else None
     items = found.get("items", [])
-    save_json(path, {"v": BOX_CACHE_VERSION, "items": items, "flatlay": flatlay, "hero": hero, "model": model})
+    save_json(
+        path,
+        {
+            "v": BOX_CACHE_VERSION,
+            "items": items,
+            "photos": photos,
+            "flatlay_sha1": flat_img["source_sha1"] if flat_img else None,
+            "hero_sha1": hero_img["source_sha1"] if hero_img else None,
+            "flatlay": flatlay,
+            "hero": hero,
+            "model": model,
+        },
+    )
     msg = f"Tìm thấy {len(items)} phụ kiện" if items else "Không xác định được phụ kiện trong hộp"
     msg += f" · ảnh bày phụ kiện: {flatlay}" if flatlay else ""
     msg += f" · ảnh đại diện: {hero}" if hero else ""
@@ -432,16 +454,30 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
     for p in products:
         reporter.check_cancelled()
         offset = done_before
+        failed: list = []
         images_by_slug[p.slug] = download_images(
             p.image_urls,
             product_dir(p.slug) / "images",
             p.slug,
             on_progress=lambda d, _t, o=offset: (reporter.check_cancelled(), reporter.progress("images", o + d, total)),
+            failures=failed,
         )
+        for f in failed:
+            reporter.log("images", f"Bỏ qua 1 ảnh không tải/xử lý được: {f['url']} - {f['error'][:160]}", "warn")
         removed = sum(1 for img in images_by_slug[p.slug] if img["logo_removed"])
         reporter.log("images", f"{p.slug}: {len(images_by_slug[p.slug])} ảnh sẵn sàng, đã xoá logo trên {removed} ảnh")
         done_before += len(p.image_urls)
     reporter.stage("images", "done", f"{total} ảnh")
+
+    for p in products:
+        if not p.description_text.strip():
+            reporter.log("scrape", f"'{p.title}' không có mô tả trên flycampro - AI sẽ chỉ viết ngắn từ tên và thông số.", "warn")
+        if not p.price_vnd:
+            reporter.log(
+                "scrape",
+                f"'{p.title}' không có giá trên flycampro (Liên hệ/Hết hàng) - nhập giá ở bước duyệt trước khi đăng.",
+                "warn",
+            )
 
     # 3. AI content
     reporter.stage("content", "running")
@@ -503,7 +539,9 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
         "brand": base.brand,
         "tags": derive_tags(group["title"], base.brand),
         "categories": options.categories,
-        "status": options.status,
+        # Re-importing a product that is already on the store must not silently
+        # unpublish it: start from its current status (visible in the review step).
+        "status": existing["status"] if existing and existing.get("status") in ("draft", "pending", "publish") else options.status,
         "insert_images": options.insert_images,
         "include_specs": options.include_specs,
         "on_exists": options.on_exists,
@@ -511,7 +549,7 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
         "images": gallery,
         "available_images": {
             p.slug: [
-                {"id": image_id(p.slug, img["filename"]), "logo_removed": img["logo_removed"]}
+                {"id": image_id(p.slug, img["filename"]), "logo_removed": img["logo_removed"], "sha1": img["sha1"]}
                 for img in images_by_slug[p.slug]
             ]
             for p in products
@@ -548,11 +586,34 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
             }
             for p, label in zip(products, group["labels"])
         ]
-    return normalize_draft(draft)
+    return normalize_draft(draft, require_prices=False)
 
 
-def normalize_draft(draft: dict) -> dict:
-    """Validate and clean a (possibly user-edited) draft. Raises DraftError."""
+def merge_regenerated(previous: dict, fresh: dict) -> dict:
+    """After "Viết lại bằng AI": take the new title, descriptions and box
+    lists, keep everything else the user edited (images, prices, variants,
+    categories, tags, status, options)."""
+    if previous.get("kind") != fresh.get("kind") or previous.get("key") != fresh.get("key"):
+        return fresh
+    merged = dict(previous)
+    for key in ("title", "short_description", "description", "model", "source_title", "spec_sections", "existing"):
+        if key in fresh:
+            merged[key] = fresh[key]
+    if fresh["kind"] == "simple":
+        merged["box_items"] = fresh.get("box_items", previous.get("box_items", []))
+    else:
+        boxes = {v["slug"]: v.get("box_items", []) for v in fresh.get("variants", [])}
+        merged["variants"] = [dict(v, box_items=boxes.get(v.get("slug"), v.get("box_items", []))) for v in previous.get("variants", [])]
+    merged["available_images"] = fresh.get("available_images", previous.get("available_images"))
+    return normalize_draft(merged, require_prices=False)
+
+
+def normalize_draft(draft: dict, require_prices: bool = True) -> dict:
+    """Validate and clean a (possibly user-edited) draft. Raises DraftError.
+
+    require_prices=False lets a freshly prepared draft keep price 0 for
+    products flycampro shows as "Liên hệ" / "Hết hàng"; saving and publishing
+    require a real price."""
     if not isinstance(draft, dict) or draft.get("kind") not in ("simple", "variable"):
         raise DraftError("Bản nháp không hợp lệ.")
     d = dict(draft)
@@ -605,8 +666,11 @@ def normalize_draft(draft: dict) -> dict:
 
     def clean_prices(obj, label):
         regular = _to_int(obj.get("regular_price"), 0)
+        if regular <= 0 and not require_prices:
+            obj["regular_price"], obj["sale_price"] = 0, None
+            return
         if regular <= 0:
-            raise DraftError(f"Giá gốc của {label} phải lớn hơn 0.")
+            raise DraftError(f"Nhập giá gốc cho {label} (flycampro không hiển thị giá - Liên hệ/Hết hàng).")
         sale = obj.get("sale_price")
         sale = _to_int(sale, 0) if sale not in (None, "") else None
         if sale is not None and not (0 < sale < regular):
@@ -745,7 +809,7 @@ def _resolve_categories(wc: WooCommerceClient, categories: list, reporter: Repor
 def build_description(draft: dict, media: dict) -> str:
     html = draft["description"]
     if draft.get("insert_images"):
-        urls = [media[ref]["url"] for ref in draft["images"] if media.get(ref, {}).get("url")]
+        urls = list(dict.fromkeys(media[ref]["url"] for ref in draft["images"] if media.get(ref, {}).get("url")))
         html = interleave_images(html, urls, draft["title"])
     if draft["kind"] == "simple" and draft.get("box_items"):
         html += "\n" + build_list_html(draft["box_items"], "Trong hộp có gì:")
@@ -867,7 +931,10 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
             "sku": draft["sku"],
             "description": build_description(draft, media),
             "short_description": draft["short_description"],
-            "images": [{"id": media[ref]["id"], "position": i} for i, ref in enumerate(draft["images"])],
+            "images": [
+                {"id": mid, "position": i}
+                for i, mid in enumerate(dict.fromkeys(media[ref]["id"] for ref in draft["images"]))
+            ],
             "tags": [{"name": t} for t in draft["tags"]],
             "meta_data": [{"key": SOURCE_META_KEY, "value": " ".join(draft["source_urls"])}],
         }
@@ -905,8 +972,28 @@ def publish(draft: dict, reporter: Optional[Reporter] = None, index: Optional[Me
     else:
         labels = [v["label"] for v in draft["variants"]]
         if existing:
-            current = _attribute_options(existing)
-            merged = list(dict.fromkeys((current or []) + labels))
+            current = _attribute_options(existing) or []
+            # Options must match the variations that will exist afterwards:
+            # updated/created ones carry the draft label, skipped ones keep the
+            # label they have on the store, unmatched store variations stay.
+            final, matched = [], set()
+            for v in draft["variants"]:
+                found = existing_variation(v)
+                if found:
+                    matched.add(found["id"])
+                    if not update:
+                        final.append(
+                            next(
+                                (a.get("option") for a in found.get("attributes", []) if a.get("name") == VARIATION_ATTRIBUTE_NAME),
+                                v["label"],
+                            )
+                        )
+                        continue
+                final.append(v["label"])
+            for var in current_vars:
+                if var["id"] not in matched:
+                    final.extend(a.get("option") for a in var.get("attributes", []) if a.get("name") == VARIATION_ATTRIBUTE_NAME)
+            merged = list(dict.fromkeys([o for o in current if o in final] + final))
             attributes = [a for a in existing.get("attributes", []) if a.get("name") != VARIATION_ATTRIBUTE_NAME]
             attributes.append({"name": VARIATION_ATTRIBUTE_NAME, "options": merged, "visible": True, "variation": True})
             if update:

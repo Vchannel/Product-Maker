@@ -313,6 +313,9 @@ def create_app(start_worker: bool = True) -> Flask:
     def api_create_job():
         body = _json_body()
         urls = _clean_urls(body.get("urls"))
+        missing = settings.missing_keys()
+        if missing:
+            raise ApiError(f"Chưa cấu hình đủ để nhập sản phẩm (thiếu: {', '.join(missing)}) - vào Cài đặt.", 409)
         other = jobs.find_active_overlap(urls)
         if other and not body.get("allow_duplicate"):
             raise ApiError("Đã có một phiên đang xử lý link này.", 409, job_id=other["id"])

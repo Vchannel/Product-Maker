@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from html import escape
 from pathlib import Path
 
@@ -20,7 +21,11 @@ from .images import ImageDownloadError, fetch_image_bytes, to_vision_jpeg
 FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-MAX_VISION_IMAGES = 8
+MAX_BOX_TAB_IMAGES = 3
+# Every gallery photo is shown (up to this many) so the hero / flat-lay can be
+# any of them; large galleries are sent at a smaller size to limit tokens.
+MAX_GALLERY_IMAGES = 16
+LARGE_GALLERY = 8
 
 SYSTEM_PROMPT = """Bạn là copywriter thương mại điện tử tiếng Việt cho vchannelstore.com - cửa hàng bán \
 thiết bị DJI chính hãng.
@@ -100,7 +105,10 @@ class RewriteError(RuntimeError):
 
 
 def make_client(api_key: str = "") -> "anthropic.Anthropic":
-    return anthropic.Anthropic(api_key=api_key or None, max_retries=3, timeout=300.0)
+    key = (api_key or os.environ.get("ANTHROPIC_API_KEY", "")).strip()
+    if not key:
+        raise RewriteError("Chưa có Anthropic API key - vào Cài đặt để điền rồi bấm 'Thử lại'.")
+    return anthropic.Anthropic(api_key=key, max_retries=3, timeout=300.0)
 
 
 def _call_structured(client, model: str, system: str, content, schema: dict, max_tokens: int, what: str) -> dict:
@@ -151,7 +159,10 @@ def _call_structured(client, model: str, system: str, content, schema: dict, max
 def _build_user_prompt(title: str, description_text: str, spec_sections: list, box_contents_text: str) -> str:
     parts = [
         f"<tieu_de_goc>\n{title}\n</tieu_de_goc>",
-        f"<mo_ta_goc>\n{description_text}\n</mo_ta_goc>",
+        f"<mo_ta_goc>\n{description_text}\n</mo_ta_goc>"
+        if (description_text or "").strip()
+        else "<mo_ta_goc>\n(Trang gốc không có mô tả. Chỉ viết ngắn gọn 1-2 đoạn dựa trên tên sản phẩm và danh sách "
+        "thông số; không thêm công dụng, tính năng hay thông tin nào khác.)\n</mo_ta_goc>",
         "<thong_so>\n" + json.dumps(spec_sections, ensure_ascii=False) + "\n</thong_so>",
     ]
     if (box_contents_text or "").strip():
@@ -202,13 +213,13 @@ def rewrite_content(
     return structured_to_html(data)
 
 
-def _image_block(data: bytes) -> dict:
+def _image_block(data: bytes, max_side: int = 1568) -> dict:
     return {
         "type": "image",
         "source": {
             "type": "base64",
             "media_type": "image/jpeg",
-            "data": base64.standard_b64encode(to_vision_jpeg(data)).decode("ascii"),
+            "data": base64.standard_b64encode(to_vision_jpeg(data, max_side)).decode("ascii"),
         },
     }
 
@@ -231,7 +242,7 @@ def describe_box_contents(
     content = []
     n = 0
     shown_gallery = 0
-    for url in list(box_image_urls)[:3]:
+    for url in list(box_image_urls)[:MAX_BOX_TAB_IMAGES]:
         try:
             data = fetch_image_bytes(url)
         except ImageDownloadError:
@@ -239,13 +250,12 @@ def describe_box_contents(
         n += 1
         content.append({"type": "text", "text": f"Ảnh T{n} (tab 'Trong hộp có gì'):"})
         content.append(_image_block(data))
-    for path in image_paths:
-        if n >= MAX_VISION_IMAGES:
-            break
+    side = 1024 if len(image_paths) > LARGE_GALLERY else 1568
+    for path in list(image_paths)[:MAX_GALLERY_IMAGES]:
         n += 1
         shown_gallery += 1
         content.append({"type": "text", "text": f"Ảnh G{shown_gallery} (gallery sản phẩm):"})
-        content.append(_image_block(Path(path).read_bytes()))
+        content.append(_image_block(Path(path).read_bytes(), side))
     if n == 0:
         return {"items": [], "flatlay_index": None, "hero_index": None}
     if (box_contents_text or "").strip():
@@ -253,7 +263,7 @@ def describe_box_contents(
     content.append({"type": "text", "text": "Liệt kê phụ kiện trong hộp."})
 
     data = _call_structured(
-        client, model, BOX_SYSTEM_PROMPT, content, BOX_SCHEMA, max_tokens=4000, what="đọc phụ kiện trong hộp"
+        client, model, BOX_SYSTEM_PROMPT, content, BOX_SCHEMA, max_tokens=12000, what="đọc phụ kiện trong hộp"
     )
     def gallery_index(value):
         return value - 1 if isinstance(value, int) and 1 <= value <= shown_gallery else None

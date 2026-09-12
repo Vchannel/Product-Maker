@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 import requests
 from PIL import Image
 
-from .scraper import USER_AGENT
+from .scraper import SESSION
 from .watermark import ALGORITHM_VERSION, remove_logo
 
 VALID_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
@@ -50,7 +50,7 @@ def _download(url: str, dest: Path, timeout: int) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, stream=True, timeout=timeout)
+        resp = SESSION.get(url, stream=True, timeout=timeout)
         resp.raise_for_status()
         with open(tmp, "wb") as f:
             for chunk in resp.iter_content(chunk_size=65536):
@@ -71,9 +71,14 @@ def download_images(
     timeout: int = 60,
     on_progress: Optional[Callable[[int, int], None]] = None,
     force: bool = False,
+    failures: Optional[list] = None,
 ) -> list:
     """Return [{url, path, filename, original_path, logo_removed, sha1}] in
-    gallery order. Already-processed files are reused."""
+    gallery order. Already-processed files are reused.
+
+    With a `failures` list, a photo that can't be downloaded or processed is
+    skipped and recorded there ({url, error}) instead of failing the whole
+    product; an error is still raised when no photo at all succeeds."""
     dest_dir = Path(dest_dir)
     originals = dest_dir / "_original"
     originals.mkdir(parents=True, exist_ok=True)
@@ -99,18 +104,29 @@ def download_images(
             and orig_path.exists()
         )
         if not up_to_date:
-            if force or not orig_path.exists() or rec.get("url") not in (None, url):
-                _download(url, orig_path, timeout)
             try:
-                result = remove_logo(str(orig_path), str(clean_path))
-            except Exception as e:  # noqa: BLE001 - any PIL/numpy failure
-                raise ImageDownloadError(f"Lỗi xử lý xoá logo trên ảnh {filename}: {e}") from e
+                if force or not orig_path.exists() or rec.get("url") not in (None, url):
+                    _download(url, orig_path, timeout)
+                try:
+                    result = remove_logo(str(orig_path), str(clean_path))
+                except Exception as e:  # noqa: BLE001 - any PIL/numpy failure
+                    raise ImageDownloadError(f"Lỗi xử lý xoá logo trên ảnh {filename}: {e}") from e
+            except ImageDownloadError as e:
+                if failures is None:
+                    raise
+                failures.append({"url": url, "error": str(e)})
+                if on_progress:
+                    on_progress(i, total)
+                continue
             rec = {
                 "v": ALGORITHM_VERSION,
                 "url": url,
                 "logo_removed": result.removed,
                 "box": list(result.box) if result.box else None,
                 "sha1": sha1_file(clean_path),
+                # Identity of the downloaded photo itself - stays the same when
+                # the logo algorithm changes and the cleaned copy is rebuilt.
+                "source_sha1": sha1_file(orig_path),
             }
             records[filename] = rec
             record_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -123,16 +139,19 @@ def download_images(
                 "filename": filename,
                 "logo_removed": bool(rec.get("logo_removed")),
                 "sha1": rec.get("sha1") or sha1_file(clean_path),
+                "source_sha1": rec.get("source_sha1") or sha1_file(orig_path),
             }
         )
         if on_progress:
             on_progress(i, total)
+    if failures and not results:
+        raise ImageDownloadError(f"Không tải được ảnh nào của sản phẩm: {failures[0]['error']}")
     return results
 
 
 def fetch_image_bytes(url: str, timeout: int = 30) -> bytes:
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout)
+        resp = SESSION.get(url, timeout=timeout)
         resp.raise_for_status()
         return resp.content
     except requests.RequestException as e:

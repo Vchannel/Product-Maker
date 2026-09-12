@@ -97,6 +97,7 @@ function updateCount(urls) {
 }
 
 function priceBlock(price) {
+  if (!price) return h("div", { class: "price", title: "flycampro không hiển thị giá - nhập giá ở bước duyệt", style: { color: "var(--warning-text)" } }, "Liên hệ");
   const d = discount();
   const sale = d > 0 && d < price ? price - d : null;
   return h("div", { class: "price" }, sale ? [fmtVND(sale), h("s", null, fmtVND(price))] : fmtVND(price));

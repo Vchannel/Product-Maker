@@ -14,12 +14,39 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 SUPPORTED_HOSTS = {"flycampro.vn", "www.flycampro.vn"}
+
+
+def _make_session() -> requests.Session:
+    """Shared session for flycampro pages and images. Retries transient
+    failures (DNS hiccups, dropped connections, 429/5xx) with backoff - a
+    real crawl of 70 products hit a burst of DNS resolution errors."""
+    retry = Retry(
+        total=4,
+        connect=4,
+        read=2,
+        status=3,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=8)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers["User-Agent"] = USER_AGENT
+    return session
+
+
+SESSION = _make_session()
 
 
 class ScrapeError(RuntimeError):
@@ -137,7 +164,11 @@ def _extract_price(soup: BeautifulSoup) -> int:
             digits = re.sub(r"[^\d]", "", match.group(1))
             if digits:
                 return int(digits)
-    raise ScrapeError("Không tìm thấy giá sản phẩm (có thể sản phẩm đang hết hàng hoặc 'Liên hệ').")
+        # The price block exists but shows no amount: flycampro lists the
+        # product as "Liên hệ" / "Hết hàng". Import it anyway with price 0;
+        # the price has to be entered in the review step before publishing.
+        return 0
+    raise ScrapeError("Không tìm thấy khối giá trên trang - bố cục trang flycampro có thể đã thay đổi.")
 
 
 def _extract_title(soup: BeautifulSoup) -> str:
@@ -170,11 +201,10 @@ def _html_block_to_text(el) -> str:
 
 
 def _extract_description(soup: BeautifulSoup) -> str:
+    # Some accessory pages have an empty description tab; that's allowed (the
+    # AI then writes a short text from the title and specs only).
     el = soup.select_one("#idTab1 .rte") or soup.select_one("#idTab1")
-    text = _html_block_to_text(el)
-    if not text:
-        raise ScrapeError("Không tìm thấy mô tả sản phẩm (#idTab1).")
-    return text
+    return _html_block_to_text(el)
 
 
 def _extract_box_contents(soup: BeautifulSoup) -> str:
@@ -295,7 +325,7 @@ def parse_product_html(html: str, url: str) -> ProductData:
 
 def scrape_product(url: str, timeout: int = 30) -> ProductData:
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout)
+        resp = SESSION.get(url, timeout=timeout)
         resp.raise_for_status()
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:

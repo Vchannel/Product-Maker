@@ -167,7 +167,17 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
       });
       return tile;
     }));
-    const pool = allImages.filter((img) => !draft.images.includes(img.id));
+    // Photos repeated byte-for-byte on several combo pages (same sha1) are
+    // offered once, and not at all when a copy is already in the gallery.
+    const shaOf = Object.fromEntries(allImages.map((i) => [i.id, i.sha1 || i.id]));
+    const taken = new Set(draft.images.map((ref) => shaOf[ref] || ref));
+    const pool = [];
+    for (const img of allImages) {
+      const key = img.sha1 || img.id;
+      if (taken.has(key)) continue;
+      taken.add(key);
+      pool.push(img);
+    }
     poolWrap.hidden = !pool.length;
     render(poolEl, pool.map((img) => h("div", { class: "img-tile pool", title: "Thêm vào sản phẩm", tabindex: "0", role: "button",
       onclick: () => { draft.images.push(img.id); drawGallery(); changed(); },
@@ -214,6 +224,15 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
       note.el);
   }
 
+  // Declared before the variant blocks are built (they register their badges here).
+  const defaultBadges = new Map();
+  function markDefaultVariant() {
+    // Mirrors pipeline.cheapest_label: the cheapest option is pre-selected on the store.
+    const price = (x) => x.sale_price || x.regular_price || Infinity;
+    const cheapest = draft.variants.reduce((best, x) => (price(x) < price(best) ? x : best), draft.variants[0]);
+    for (const [v, badge] of defaultBadges) badge.hidden = v !== cheapest;
+  }
+
   let pricingCard;
   if (!variable) {
     const boxHost = h("div");
@@ -230,14 +249,6 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
       h("div", { class: "card-head" }, h("h2", null, icon("layers"), `Phiên bản (${draft.variants.length})`), h("span", { class: "hint" }, "Khách chọn ở thuộc tính “Phiên bản”")),
       h("div", { class: "card-body" }, draft.variants.map((v) => variantBlock(v))));
     markDefaultVariant();
-  }
-
-  const defaultBadges = new Map();
-  function markDefaultVariant() {
-    // Mirrors pipeline.cheapest_label: the cheapest option is pre-selected on the store.
-    const price = (x) => x.sale_price || x.regular_price || Infinity;
-    const cheapest = draft.variants.reduce((best, x) => (price(x) < price(best) ? x : best), draft.variants[0]);
-    for (const [v, badge] of defaultBadges) badge.hidden = v !== cheapest;
   }
 
   function variantBlock(v) {
@@ -379,6 +390,9 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
         h("p", null, draft.existing
           ? (draft.on_exists === "update" ? "Nội dung, ảnh và giá của sản phẩm hiện có sẽ bị ghi đè." : "Nội dung sản phẩm hiện có được giữ nguyên; chỉ bổ sung phần còn thiếu.")
           : isPublic ? "Sản phẩm sẽ hiển thị công khai cho khách ngay sau khi tạo." : `Sản phẩm sẽ được tạo với trạng thái "${STATUSES.find((s) => s[0] === draft.status)?.[1] || draft.status}".`),
+        draft.existing && draft.on_exists === "update" && draft.existing.status !== draft.status
+          ? h("p", { style: { color: "var(--warning-text)" } }, `Trạng thái trên website sẽ đổi: ${draft.existing.status} → ${draft.status}.`)
+          : null,
         h("p", { class: "small faint" }, `${draft.images.length} ảnh sẽ được upload (ảnh đã có trên site sẽ được dùng lại).`)),
       confirm: draft.existing ? "Tiếp tục" : isPublic ? "Đăng & mở bán" : "Đăng",
     });
@@ -395,7 +409,7 @@ export function mountReview(container, job, { onPublish, onRegenerate }) {
   async function regenerate(btn) {
     const ok = await confirmDialog({
       title: "Viết lại nội dung bằng AI?",
-      message: "AI sẽ viết một bản hoàn toàn mới cho tên, mô tả và danh sách phụ kiện. Những chỉnh sửa bạn đã làm trên bản nháp này sẽ bị thay thế.",
+      message: "AI sẽ viết bản mới cho tên, mô tả ngắn, mô tả chi tiết và danh sách phụ kiện - các chỉnh sửa của bạn ở những phần này sẽ bị thay. Ảnh, giá, phiên bản, danh mục, tag và trạng thái được giữ nguyên.",
       confirm: "Viết lại",
     });
     if (!ok) return;

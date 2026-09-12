@@ -11,6 +11,7 @@ Web app chỉ chạy trên máy này (127.0.0.1) vì nó giữ API key và mật
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import sys
 import threading
@@ -37,13 +38,44 @@ def running_instance(port: int, host: str = "127.0.0.1") -> bool:
         return False
 
 
+_INSTANCE_LOCK = None
+
+
+def acquire_instance_lock(data_dir) -> bool:
+    """Hold an exclusive lock on data/app.lock for the life of the process, so
+    a second copy can't start even when the port probe can't tell (on Windows
+    SO_REUSEADDR lets two servers bind the same port)."""
+    global _INSTANCE_LOCK
+    data_dir.mkdir(parents=True, exist_ok=True)
+    handle = open(data_dir / "app.lock", "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    _INSTANCE_LOCK = handle
+    return True
+
+
 def find_port(preferred: int, host: str = "127.0.0.1") -> int:
     for port in [preferred, *range(preferred + 1, preferred + 30)]:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             # Same option the web server uses: without it, connections from a
             # just-closed instance (TIME_WAIT) make a free port look busy and the
             # app silently moves to another port.
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if os.name == "nt":
+                # Windows: SO_REUSEADDR would let us "bind" a port another server owns.
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind((host, port))
                 return port
@@ -68,7 +100,16 @@ def main() -> None:
             webbrowser.open(url)
         return
 
+    from lib import settings
     from web import create_app
+
+    if not acquire_instance_lock(settings.DATA_DIR):
+        url = f"http://{host}:{args.port}"
+        print(f"\n  Product Maker đã đang chạy (một cửa sổ khác đang giữ app). Mở {url}")
+        print("  Muốn khởi động lại: đóng cửa sổ dòng lệnh đang chạy app, rồi chạy lại.\n")
+        if not args.no_browser:
+            webbrowser.open(url)
+        return
 
     port = find_port(args.port, host)
     url = f"http://{host}:{port}"
