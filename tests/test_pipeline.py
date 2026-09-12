@@ -213,6 +213,9 @@ def test_variant_image_is_flatlay_and_cheapest_option_is_default(fake_ai, store)
     assert [v["label"] for v in draft["variants"]] == ["Adventure Combo", "Limitless Riding Combo", "Standard Combo"]
     for v in draft["variants"]:
         assert v["image"] == f"{v['slug']}/{v['slug']}-02.png", "combo image = photo of everything in its box"
+    base = "dji-osmo-360-ii-adventure-combo"
+    assert draft["images"][0] == f"{base}/{base}-03.png", "main image = plain device-only photo"
+    assert sorted(draft["images"]) == sorted(f"{base}/{base}-0{i}.png" for i in (1, 2, 3)), "gallery keeps every photo"
 
     result = pipeline.publish(draft)
     parent = store.products[result["product_id"]]

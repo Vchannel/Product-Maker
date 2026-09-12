@@ -78,7 +78,9 @@ liệt kê thân máy chính và không đoán số hiệu model - số hiệu �
 Không ghi các phương án kiểu "A hoặc B".
 - Nếu không có ảnh nào thuộc hai loại trên, trả về found = false và danh sách rỗng.
 
-Ngoài ra, chọn flatlay_image: số thứ tự N của ảnh gallery (nhãn "G<N>") chụp bày toàn bộ những gì khách nhận được trong hộp - thân máy cùng các phụ kiện xếp riêng từng món. Ảnh này sẽ làm ảnh đại diện cho combo, nên đừng chọn ảnh chỉ có thân máy hay ảnh infographic nhiều chữ nếu có ảnh flat-lay rõ hơn. Trả về 0 nếu gallery không có ảnh như vậy."""
+Ngoài ra, chọn flatlay_image: số thứ tự N của ảnh gallery (nhãn "G<N>") chụp bày toàn bộ những gì khách nhận được trong hộp - thân máy cùng các phụ kiện xếp riêng từng món. Ảnh này sẽ làm ảnh đại diện cho combo, nên đừng chọn ảnh chỉ có thân máy hay ảnh infographic nhiều chữ nếu có ảnh flat-lay rõ hơn. Trả về 0 nếu gallery không có ảnh như vậy.
+
+Và chọn hero_image: số thứ tự N của ảnh gallery ("G<N>") dùng làm ảnh đại diện sản phẩm trên cửa hàng. Ảnh này phải đơn giản: chỉ có thân máy chính trên nền trắng, không có chữ, icon, huy hiệu hay bảng tính năng, không kèm phụ kiện. Trong các ảnh đạt yêu cầu, ưu tiên góc chụp nghiêng nhìn rõ mặt trước (ống kính, màn hình) của máy. Trả về 0 nếu không có ảnh nào đạt."""
 
 BOX_SCHEMA = {
     "type": "object",
@@ -86,8 +88,9 @@ BOX_SCHEMA = {
         "found": {"type": "boolean"},
         "items": {"type": "array", "items": {"type": "string"}},
         "flatlay_image": {"type": "integer"},
+        "hero_image": {"type": "integer"},
     },
-    "required": ["found", "items", "flatlay_image"],
+    "required": ["found", "items", "flatlay_image", "hero_image"],
     "additionalProperties": False,
 }
 
@@ -217,11 +220,12 @@ def describe_box_contents(
     box_image_urls: list = (),
     box_contents_text: str = "",
 ) -> dict:
-    """Return {"items": [...in-box accessories...], "flatlay_index": int|None}.
+    """Return {"items": [...], "flatlay_index": int|None, "hero_index": int|None}.
 
     items is [] when nothing reliable was found. flatlay_index is the 0-based
     position in image_paths of the photo showing everything in the box (used
-    as the combo's own image). box_image_urls are images from the page's
+    as the combo's own image); hero_index is the plain device-only photo used
+    as the product's main image. box_image_urls are images from the page's
     "Trong hộp có gì" tab (often a screenshot of the official list) and are
     shown to Claude first."""
     content = []
@@ -243,7 +247,7 @@ def describe_box_contents(
         content.append({"type": "text", "text": f"Ảnh G{shown_gallery} (gallery sản phẩm):"})
         content.append(_image_block(Path(path).read_bytes()))
     if n == 0:
-        return {"items": [], "flatlay_index": None}
+        return {"items": [], "flatlay_index": None, "hero_index": None}
     if (box_contents_text or "").strip():
         content.append({"type": "text", "text": f"Văn bản 'Trong hộp có gì' trên trang:\n{box_contents_text.strip()}"})
     content.append({"type": "text", "text": "Liệt kê phụ kiện trong hộp."})
@@ -251,10 +255,15 @@ def describe_box_contents(
     data = _call_structured(
         client, model, BOX_SYSTEM_PROMPT, content, BOX_SCHEMA, max_tokens=4000, what="đọc phụ kiện trong hộp"
     )
-    flatlay = data.get("flatlay_image")
-    flatlay_index = flatlay - 1 if isinstance(flatlay, int) and 1 <= flatlay <= shown_gallery else None
+    def gallery_index(value):
+        return value - 1 if isinstance(value, int) and 1 <= value <= shown_gallery else None
+
     items = [str(i).strip() for i in data.get("items", []) if str(i).strip()] if data.get("found") else []
-    return {"items": items, "flatlay_index": flatlay_index}
+    return {
+        "items": items,
+        "flatlay_index": gallery_index(data.get("flatlay_image")),
+        "hero_index": gallery_index(data.get("hero_image")),
+    }
 
 
 def check_api(api_key: str, model: str) -> str:

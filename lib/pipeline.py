@@ -327,19 +327,20 @@ def preview(urls: list, reporter: Optional[Reporter] = None) -> dict:
     return result
 
 
-BOX_CACHE_VERSION = 2
+BOX_CACHE_VERSION = 3
 
 
 def _box_items(product: ProductData, images: list, model: str, force: bool, reporter: Reporter) -> tuple:
-    """(in-box accessory list, filename of the "everything in the box" photo or None)."""
+    """(in-box accessory list, flat-lay photo filename, plain hero photo filename);
+    the filenames are None when no suitable photo was found."""
     path = product_dir(product.slug) / "box_description.json"
     cached = None if force else load_json(path)
     filenames = [img["filename"] for img in images]
     if cached is not None and cached.get("v") == BOX_CACHE_VERSION:
-        flatlay = cached.get("flatlay")
-        return cached.get("items", []), flatlay if flatlay in filenames else None
-    # Older caches (a bare list or an HTML <ul>) don't know which photo is the
-    # flat-lay, so vision runs again once.
+        flatlay, hero = cached.get("flatlay"), cached.get("hero")
+        return cached.get("items", []), flatlay if flatlay in filenames else None, hero if hero in filenames else None
+    # Older caches don't know which photos are the flat-lay / plain hero shot,
+    # so vision runs again once.
     reporter.log("content", f"AI đang xem ảnh để đọc phụ kiện trong hộp của '{product.title}'")
     found = describe_box_contents(
         make_client(),
@@ -348,13 +349,17 @@ def _box_items(product: ProductData, images: list, model: str, force: bool, repo
         product.box_image_urls,
         product.box_contents_text,
     )
-    index = found.get("flatlay_index")
-    flatlay = filenames[index] if isinstance(index, int) and 0 <= index < len(filenames) else None
+    def pick(index):
+        return filenames[index] if isinstance(index, int) and 0 <= index < len(filenames) else None
+
+    flatlay, hero = pick(found.get("flatlay_index")), pick(found.get("hero_index"))
     items = found.get("items", [])
-    save_json(path, {"v": BOX_CACHE_VERSION, "items": items, "flatlay": flatlay, "model": model})
+    save_json(path, {"v": BOX_CACHE_VERSION, "items": items, "flatlay": flatlay, "hero": hero, "model": model})
     msg = f"Tìm thấy {len(items)} phụ kiện" if items else "Không xác định được phụ kiện trong hộp"
-    reporter.log("content", msg + (f" · ảnh bày phụ kiện: {flatlay}" if flatlay else ""))
-    return items, flatlay
+    msg += f" · ảnh bày phụ kiện: {flatlay}" if flatlay else ""
+    msg += f" · ảnh đại diện: {hero}" if hero else ""
+    reporter.log("content", msg)
+    return items, flatlay, hero
 
 
 def _rewrite(key_dir: Path, title: str, product: ProductData, model: str, force: bool, reporter: Reporter,
@@ -443,12 +448,12 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
     group = plan_group(products)
     key_dir = settings.CACHE_DIR / group["key"]
     base = products[0]
-    box_by_slug, flatlay_by_slug = {}, {}
+    box_by_slug, flatlay_by_slug, hero_by_slug = {}, {}, {}
     if options.read_box:
         for p in products:
             reporter.check_cancelled()
             try:
-                box_by_slug[p.slug], flatlay_by_slug[p.slug] = _box_items(
+                box_by_slug[p.slug], flatlay_by_slug[p.slug], hero_by_slug[p.slug] = _box_items(
                     p, images_by_slug[p.slug], model, options.force_rewrite, reporter
                 )
             except RewriteError as e:
@@ -471,6 +476,12 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
 
     # 4. draft
     gallery = [image_id(base.slug, img["filename"]) for img in images_by_slug[base.slug]]
+    # The store's main image is a plain device-only photo (flycampro's first
+    # photo is usually an infographic with text), so it goes to the front.
+    hero = hero_by_slug.get(base.slug)
+    if hero:
+        hero_ref = image_id(base.slug, hero)
+        gallery = [hero_ref] + [ref for ref in gallery if ref != hero_ref]
     draft = {
         "version": DRAFT_VERSION,
         "kind": group["kind"],
