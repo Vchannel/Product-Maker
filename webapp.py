@@ -23,9 +23,27 @@ for _stream in (sys.stdout, sys.stderr):
 DEFAULT_PORT = 8686  # macOS reserves 5000/7000 for AirPlay Receiver
 
 
+def running_instance(port: int, host: str = "127.0.0.1") -> bool:
+    """True when a Product Maker is already answering on this port. Two copies
+    would share one database with two job workers, and the browser would keep
+    talking to whichever copy owns the familiar port."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/api/overview", timeout=2) as resp:
+            return "stats" in json.load(resp)
+    except Exception:  # noqa: BLE001 - anything else on the port is "not us"
+        return False
+
+
 def find_port(preferred: int, host: str = "127.0.0.1") -> int:
     for port in [preferred, *range(preferred + 1, preferred + 30)]:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # Same option the web server uses: without it, connections from a
+            # just-closed instance (TIME_WAIT) make a free port look busy and the
+            # app silently moves to another port.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind((host, port))
                 return port
@@ -41,20 +59,28 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="Chạy Flask dev server (tự reload khi sửa code)")
     args = parser.parse_args()
 
+    host = "127.0.0.1"
+    if running_instance(args.port, host):
+        url = f"http://{host}:{args.port}"
+        print(f"\n  Product Maker đã đang chạy tại {url} - mở lại cửa sổ đó thay vì chạy thêm bản thứ hai.")
+        print("  (Muốn khởi động lại: đóng cửa sổ dòng lệnh đang chạy app, rồi chạy lại.)\n")
+        if not args.no_browser:
+            webbrowser.open(url)
+        return
+
     from web import create_app
 
-    host = "127.0.0.1"
     port = find_port(args.port, host)
     url = f"http://{host}:{port}"
     app = create_app()
 
-    print("")
+    print("", flush=True)
     print("  ┌──────────────────────────────────────────────┐")
     print("  │  Product Maker đang chạy                     │")
     print(f"  │  Mở trình duyệt tại: {url:<24}│")
     print("  │  Giữ cửa sổ này mở. Nhấn Ctrl+C để tắt.      │")
-    print("  └──────────────────────────────────────────────┘")
-    print("")
+    print("  └──────────────────────────────────────────────┘", flush=True)
+    print("", flush=True)
 
     if not args.no_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
