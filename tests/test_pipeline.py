@@ -66,8 +66,9 @@ def test_variable_publish_and_extend_with_new_combo(fake_ai, store):
     assert parent["type"] == "variable"
     assert parent["attributes"][0]["options"] == ["Creator Combo", "Standard Combo"]
     assert len(store.variations[parent["id"]]) == 2
-    # gallery (3) + standard combo hero (1); creator hero is already in the gallery
-    assert store.uploads == 4
+    # gallery = 3 photos of each combo; every variant image is one of them
+    assert len(draft["images"]) == 6
+    assert store.uploads == 6
 
     # Later: a third combo of the same device is imported.
     c = seed_product("dji-pocket-4-vlog-combo", "DJI Pocket 4 Vlog Combo", 16000000)
@@ -215,7 +216,8 @@ def test_variant_image_is_flatlay_and_cheapest_option_is_default(fake_ai, store)
         assert v["image"] == f"{v['slug']}/{v['slug']}-02.png", "combo image = photo of everything in its box"
     base = "dji-osmo-360-ii-adventure-combo"
     assert draft["images"][0] == f"{base}/{base}-03.png", "main image = plain device-only photo"
-    assert sorted(draft["images"]) == sorted(f"{base}/{base}-0{i}.png" for i in (1, 2, 3)), "gallery keeps every photo"
+    expected = {f"{v['slug']}/{v['slug']}-0{i}.png" for v in draft["variants"] for i in (1, 2, 3)}
+    assert set(draft["images"]) == expected and len(draft["images"]) == 9, "gallery has the photos of every combo"
 
     result = pipeline.publish(draft)
     parent = store.products[result["product_id"]]
@@ -225,3 +227,14 @@ def test_variant_image_is_flatlay_and_cheapest_option_is_default(fake_ai, store)
     images = {m["id"]: m["source_url"] for m in store.media.values()}
     for label, var in by_label.items():
         assert images[var["image"]["id"]].endswith("-02.png"), label
+
+
+def test_gallery_merges_combos_and_drops_identical_photos(fake_ai, store):
+    # flycampro repeats the same device shots on every combo page.
+    a = seed_product("y-standard-combo", "DJI Y Standard Combo", 1000000, tint=7)
+    b = seed_product("y-fly-more-combo", "DJI Y Fly More Combo", 1500000, n_images=4, tint=7)
+    draft = pipeline.prepare([a, b], options())
+    # b's first 3 photos are byte-identical to a's; only its 4th is new.
+    assert len(draft["images"]) == 4
+    assert draft["images"][-1] == "y-fly-more-combo/y-fly-more-combo-04.png"
+    assert draft["images"][0] == "y-standard-combo/y-standard-combo-03.png", "plain hero photo still first"

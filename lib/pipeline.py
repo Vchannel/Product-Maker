@@ -475,7 +475,16 @@ def prepare(urls: list, options: PrepareOptions, reporter: Optional[Reporter] = 
     reporter.stage("content", "done")
 
     # 4. draft
-    gallery = [image_id(base.slug, img["filename"]) for img in images_by_slug[base.slug]]
+    # Gallery = photos of every combo, not just the first one, each distinct
+    # photo once: flycampro repeats the same device shots on every combo page
+    # byte for byte, while each combo adds its own (box flat-lay, infographic).
+    # Exact content hashes only - perceptual hashes confuse different angles.
+    gallery, seen = [], set()
+    for p in products:
+        for img in images_by_slug[p.slug]:
+            if img["sha1"] not in seen:
+                seen.add(img["sha1"])
+                gallery.append(image_id(p.slug, img["filename"]))
     # The store's main image is a plain device-only photo (flycampro's first
     # photo is usually an infographic with text), so it goes to the front.
     hero = hero_by_slug.get(base.slug)

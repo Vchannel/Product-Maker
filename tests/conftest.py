@@ -56,7 +56,7 @@ def isolated(tmp_path, monkeypatch):
     return tmp_path
 
 
-def seed_product(slug: str, title: str, price: int, n_images: int = 3, specs: bool = True) -> str:
+def seed_product(slug: str, title: str, price: int, n_images: int = 3, specs: bool = True, tint: int | None = None) -> str:
     """Write a scraped product (raw.json + original images) into the cache so
     prepare() runs fully offline. Returns its URL."""
     url = f"https://flycampro.vn/products/{slug}"
@@ -78,7 +78,11 @@ def seed_product(slug: str, title: str, price: int, n_images: int = 3, specs: bo
     d.mkdir(parents=True, exist_ok=True)
     (d / "raw.json").write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
     for i, u in enumerate(image_urls, start=1):
-        make_product_image(d / "images" / "_original" / filename_for(u, slug, i), seed=i, tint=zlib.crc32(slug.encode()))
+        make_product_image(
+            d / "images" / "_original" / filename_for(u, slug, i),
+            seed=i,
+            tint=zlib.crc32(slug.encode()) if tint is None else tint,
+        )
     return url
 
 
