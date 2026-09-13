@@ -3,16 +3,16 @@
 Product photos on flycampro.vn carry a "FLYCAM PRO.VN" logo near the top-left
 corner. Two detectors, tried in order:
 
-1. Template match (lib/assets/flycampro_logo.png). The logo is always the same
-   artwork, but it is stamped at different sizes (≈187 px wide on recent
-   1500×1000 photos, noticeably larger on older 1200×800 ones and on some
-   accessory photos), so every photo is searched over a range of logo sizes.
-   Only the logo's own pixels are compared, so accessories touching or
-   overlapping the logo don't disturb the match, and only the logo footprint
-   is rebuilt from neighbouring pixels - a product touching the logo keeps its
-   shape instead of getting a white notch.
+1. Template match (lib/assets/flycampro_logo*.png). The logo artwork is fixed
+   but stamped at different sizes and with slightly different rendering
+   (recent 1500×1000 photos vs older, JPEG-compressed 1200×800 ones), so every
+   photo is searched with each template over a range of logo sizes, then the
+   size is refined. Only the logo's own pixels are compared, so accessories
+   touching or overlapping the logo don't disturb the match, and only the
+   logo footprint is rebuilt from neighbouring pixels - a product touching the
+   logo keeps its shape instead of getting a white notch.
 
-2. Cluster fallback for logo variants the template doesn't match: paints a
+2. Cluster fallback for logo variants no template matches: paints a
    rectangle over an isolated, logo-sized cluster on a flat background, and
    leaves the photo untouched when product content runs into that corner.
 """
@@ -26,14 +26,16 @@ from typing import Optional
 import numpy as np
 from PIL import Image, ImageDraw
 
-ALGORITHM_VERSION = 4
+ALGORITHM_VERSION = 5
 
-TEMPLATE_PATH = Path(__file__).parent / "assets" / "flycampro_logo.png"
-# Logo sizes searched, as a factor of the template's own pixel size (the
-# template was cut from a 1500×1000 photo where the logo is ~187 px wide).
+ASSETS = Path(__file__).parent / "assets"
+TEMPLATE_PATH = ASSETS / "flycampro_logo.png"  # from a recent 1500×1000 photo (logo ≈187 px wide)
+TEMPLATE_PATHS = (TEMPLATE_PATH, ASSETS / "flycampro_logo_old.png")  # old: from a 1200×800 JPEG photo
+# Coarse logo sizes, as a factor of each template's own pixel size.
 SCALES = tuple(float(s) for s in np.geomspace(0.5, 1.7, 17))
+REFINE = (0.96, 0.98, 1.0, 1.02, 1.04)
 # Mean abs RGB difference over the logo's solid pixels: real logos score
-# ~0-30 (native, rescaled, JPEG); photos without the logo score far higher.
+# ~0-35 (native, rescaled, JPEG); photos without the logo score ≥ ~50.
 MATCH_MAX_ERROR = 45.0
 SEARCH_FRAC = 0.42  # the logo's top-left corner lies within this share of the photo
 
@@ -54,25 +56,25 @@ class LogoResult:
     box: Optional[tuple] = None  # (x0, y0, x1, y1)
     reason: str = ""
     method: str = ""
-    mask: Optional[np.ndarray] = None  # template method: pixels to fill, relative to box
+    mask: Optional[np.ndarray] = None  # template method: logo footprint, relative to box
     error: Optional[float] = None
     scale: Optional[float] = None
+    template: Optional[str] = None
 
 
 # --------------------------------------------------------------------------
 # 1. template match
 # --------------------------------------------------------------------------
-@lru_cache(maxsize=1)
-def _base_template() -> Optional[Image.Image]:
-    if not TEMPLATE_PATH.exists():
-        return None
-    return Image.open(TEMPLATE_PATH).convert("RGB")
+@lru_cache(maxsize=4)
+def _base_template(index: int) -> Optional[Image.Image]:
+    path = TEMPLATE_PATHS[index]
+    return Image.open(path).convert("RGB") if path.exists() else None
 
 
-@lru_cache(maxsize=128)
-def _template(scale_key: int):
-    """(rgb float array, halo mask, solid mask) at scale_key / 1000."""
-    base = _base_template()
+@lru_cache(maxsize=512)
+def _template(index: int, scale_key: int):
+    """(rgb float array, halo mask, solid mask) of template `index` at scale_key / 1000."""
+    base = _base_template(index)
     if base is None:
         return None
     scale = scale_key / 1000
@@ -92,6 +94,8 @@ def _masked_error(region: np.ndarray, t: np.ndarray, solid: np.ndarray, step: in
     ys, xs = ys * step, xs * step
     tv = t[ys, xs][:, None, :]  # (pixels, 1, 3)
     cols = np.asarray(list(cols))
+    if cols.size == 0:
+        return (np.inf, 0, 0)
     col_idx = xs[:, None] + cols[None, :]
     best = (np.inf, 0, 0)
     for y in rows:
@@ -103,7 +107,7 @@ def _masked_error(region: np.ndarray, t: np.ndarray, solid: np.ndarray, step: in
 
 
 class _FFTRegion:
-    """FFTs of one search region, reused for every template size:
+    """FFTs of one search region, reused for every template and size:
     sum M(I-T)^2 = corr(I^2, M) - 2 corr(I, M*T) + sum M*T^2."""
 
     def __init__(self, region: np.ndarray):
@@ -132,62 +136,62 @@ class _FFTRegion:
 
 
 def _match_template(arr: np.ndarray) -> Optional[tuple]:
-    """Return (box, fill_mask, error, scale) for the best logo placement, or None."""
-    if _base_template() is None:
+    """Return (box, halo_mask, error, scale, template_index) for the best logo
+    placement, or None."""
+    indices = [i for i in range(len(TEMPLATE_PATHS)) if _base_template(i) is not None]
+    if not indices:
         return None
     h, w, _ = arr.shape
-    largest = _template(round(SCALES[-1] * 1000))[2].shape
-    sh = min(h, int(h * SEARCH_FRAC) + largest[0])
-    sw = min(w, int(w * SEARCH_FRAC) + largest[1])
+    largest_h = max(_template(i, round(SCALES[-1] * 1000))[2].shape[0] for i in indices)
+    largest_w = max(_template(i, round(SCALES[-1] * 1000))[2].shape[1] for i in indices)
+    sh = min(h, int(h * SEARCH_FRAC) + largest_h)
+    sw = min(w, int(w * SEARCH_FRAC) + largest_w)
     region = arr[:sh, :sw].astype(np.float32)
 
-    # Coarse: every size, every offset, on a half-resolution copy (FFT).
+    # Coarse: every template × size × offset on a half-resolution copy (FFT).
     half = region[: sh // 2 * 2, : sw // 2 * 2]
     half = (half[0::2, 0::2] + half[1::2, 0::2] + half[0::2, 1::2] + half[1::2, 1::2]) / 4
     fft_half = _FFTRegion(half)
     coarse = []
-    for scale in SCALES:
-        tpl = _template(round(scale * 500))  # half-size template for the half-size region
-        if tpl is None:
-            continue
-        t_half, _halo, solid_half = tpl
-        if solid_half.sum() < 20:
-            continue
-        ssd = fft_half.ssd_map(t_half, solid_half)
-        if ssd is None:
-            continue
-        cy, cx = (int(v) for v in np.unravel_index(int(ssd.argmin()), ssd.shape))
-        coarse.append((float(ssd[cy, cx]), scale, cy * 2, cx * 2))
+    for index in indices:
+        for scale in SCALES:
+            t_half, _halo, solid_half = _template(index, round(scale * 500))
+            if solid_half.sum() < 20:
+                continue
+            ssd = fft_half.ssd_map(t_half, solid_half)
+            if ssd is None:
+                continue
+            cy, cx = (int(v) for v in np.unravel_index(int(ssd.argmin()), ssd.shape))
+            coarse.append((float(ssd[cy, cx]), index, scale, cy * 2, cx * 2))
     if not coarse:
         return None
     coarse.sort()
 
-    # Fine: full resolution, mean-abs error, around the best few coarse hits.
+    # Fine: full resolution, mean-abs error, around the best coarse hits, with
+    # the logo size refined in small steps.
     best = None
-    for _ssd, scale, cy, cx in coarse[:3]:
-        t, halo, solid = _template(round(scale * 1000))
-        th, tw = solid.shape
-        if th > sh or tw > sw:
-            continue
-        reach = 4
-        err, y, x = _masked_error(
-            region,
-            t,
-            solid,
-            1,
-            range(max(0, cy - reach), min(sh - th, cy + reach) + 1),
-            range(max(0, cx - reach), min(sw - tw, cx + reach) + 1),
-        )
-        if best is None or err < best[0]:
-            best = (err, y, x, scale, halo, th, tw)
+    for _ssd, index, scale, cy, cx in coarse[:3]:
+        for factor in REFINE:
+            s = scale * factor
+            t, halo, solid = _template(index, round(s * 1000))
+            th, tw = solid.shape
+            if th > sh or tw > sw:
+                continue
+            reach = 4
+            err, y, x = _masked_error(
+                region,
+                t,
+                solid,
+                1,
+                range(max(0, cy - reach), min(sh - th, cy + reach) + 1),
+                range(max(0, cx - reach), min(sw - tw, cx + reach) + 1),
+            )
+            if best is None or err < best[0]:
+                best = (err, y, x, s, index, halo, th, tw)
     if best is None or best[0] > MATCH_MAX_ERROR:
         return None
-    err, y, x, scale, halo, th, tw = best
-    # Rebuild the logo's anti-aliased footprint grown by a couple of pixels:
-    # the logo sits at sub-pixel offsets, so the exact footprint would leave a
-    # faint grey outline.
-    fill = _dilate(halo, 2 if scale < 1.2 else 3)
-    return (x, y, x + tw - 1, y + th - 1), fill, err, scale
+    err, y, x, s, index, halo, th, tw = best
+    return (x, y, x + tw - 1, y + th - 1), halo, err, s, index
 
 
 def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -203,7 +207,7 @@ def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
     return out
 
 
-def _inpaint(img: np.ndarray, hole: np.ndarray, max_iter: int = 300) -> np.ndarray:
+def _inpaint(img: np.ndarray, hole: np.ndarray, max_iter: int = 400) -> np.ndarray:
     """Fill `hole` pixels by repeatedly averaging already-known 8-neighbours,
     so white background stays white and an accessory under the logo is
     continued with its own colour."""
@@ -293,8 +297,10 @@ def detect_logo(img: Image.Image) -> LogoResult:
         return LogoResult(False, reason="ảnh quá nhỏ")
     match = _match_template(arr)
     if match:
-        box, fill, err, scale = match
-        return LogoResult(True, box=box, method="template", mask=fill, error=err, scale=scale)
+        box, halo, err, scale, index = match
+        return LogoResult(
+            True, box=box, method="template", mask=halo, error=err, scale=scale, template=TEMPLATE_PATHS[index].name
+        )
     return _detect_cluster(arr)
 
 
@@ -303,7 +309,7 @@ def remove_logo(src_path: str, dest_path: str) -> LogoResult:
     destination exists even when nothing was removed)."""
     with Image.open(src_path) as im:
         im.load()
-        fmt = im.format
+        fmt = (im.format or "").upper()
         result = detect_logo(im)
         out = im
         if result.removed:
@@ -311,15 +317,20 @@ def remove_logo(src_path: str, dest_path: str) -> LogoResult:
                 out = im.convert("RGBA" if "transparency" in im.info or im.mode in ("LA", "P") else "RGB")
             if result.method == "template":
                 x0, y0, x1, y1 = result.box
-                pad = 6
+                # Rebuild the logo's anti-aliased footprint grown a little: the logo
+                # sits at sub-pixel offsets, bigger stamps have wider soft edges, and
+                # JPEG ringing spreads further - an exact footprint leaves a ghost.
+                radius = 2 + int(x1 - x0 >= 230) + int(fmt == "JPEG")
+                footprint = _dilate(result.mask, radius)
+                pad = 8
                 h, w = out.height, out.width
                 bx0, by0, bx1, by1 = max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + 1 + pad), min(h, y1 + 1 + pad)
                 data = np.asarray(out).copy()
                 hole = np.zeros((by1 - by0, bx1 - bx0), dtype=bool)
-                mh, mw = result.mask.shape
-                hole[y0 - by0 : y0 - by0 + mh, x0 - bx0 : x0 - bx0 + mw] = result.mask[: by1 - (y0), : bx1 - (x0)][
-                    : hole.shape[0] - (y0 - by0), : hole.shape[1] - (x0 - bx0)
-                ]
+                oy, ox = y0 - by0, x0 - bx0
+                fh = min(footprint.shape[0], hole.shape[0] - oy)
+                fw = min(footprint.shape[1], hole.shape[1] - ox)
+                hole[oy : oy + fh, ox : ox + fw] = footprint[:fh, :fw]
                 patch = _inpaint(data[by0:by1, bx0:bx1], hole)
                 data[by0:by1, bx0:bx1] = np.clip(np.rint(patch), 0, 255).astype(np.uint8)
                 out = Image.fromarray(data, mode=out.mode)
@@ -328,7 +339,7 @@ def remove_logo(src_path: str, dest_path: str) -> LogoResult:
                 bg = np.asarray(out)[2:12, -12:].reshape(-1, bands).mean(axis=0)
                 ImageDraw.Draw(out).rectangle(result.box, fill=tuple(int(round(c)) for c in bg))
         save_kwargs = {}
-        if (fmt or "").upper() == "JPEG":
+        if fmt == "JPEG":
             save_kwargs = {"quality": 95, "subsampling": 0}
             if out.mode != "RGB":
                 out = out.convert("RGB")
