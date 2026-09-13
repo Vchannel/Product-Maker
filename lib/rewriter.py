@@ -1,91 +1,195 @@
-"""Rewrite scraped product copy into original, sales-ready Vietnamese text via Claude.
+"""Rewrite scraped product copy into original, sales-ready Vietnamese text via
+Claude, and read "what's in the box" from product photos.
 
-Only free-text (title/description) is sent to the model. The specs table is
-handled separately in Python and is never rewritten by the model - its
-numbers must stay exactly as scraped.
+Claude returns structured JSON (enforced with output_config.format) and the
+HTML is assembled here from escaped text - the model never writes markup.
+The specs table is never sent for rewriting; its numbers stay as scraped.
 """
 from __future__ import annotations
 
 import base64
 import json
-import mimetypes
-import re
+import os
+from html import escape
 from pathlib import Path
 
 import anthropic
 
-BOX_CONTENTS_SYSTEM_PROMPT = """Bạn xem các ảnh sản phẩm được đánh số theo thứ tự trên trang flycampro.vn.
-Một trong số đó THƯỜNG (không phải luôn luôn) là ảnh flat-lay chụp toàn bộ phụ kiện đi kèm trong hộp,
-xếp riêng từng món trên nền trắng.
+from .images import ImageDownloadError, fetch_image_bytes, to_vision_jpeg
 
-Nhiệm vụ: tìm đúng ảnh đó (nếu có) và liệt kê CHÍNH XÁC những PHỤ KIỆN đi kèm nhìn thấy được trong
-ảnh đó, dưới dạng danh sách tiếng Việt.
+# Models that accept the server-side refusal fallback parameter.
+FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-QUY TẮC BẮT BUỘC:
-- KHÔNG liệt kê thiết bị camera/gimbal chính (thân máy chính) - đó là sản phẩm chính, không phải
-  phụ kiện, và bạn KHÔNG được đoán tên/số hiệu model của nó (rất dễ đọc nhầm số hiệu qua ảnh nhỏ).
-  Chỉ liệt kê những món phụ kiện xung quanh: túi đựng, dây đeo, chân đế, cáp, mic, tay cầm, ốp, v.v.
-- Không suy đoán số lượng hay thông số chi tiết nếu không đọc rõ được chữ trên vật thể - khi đó mô
-  tả chung chung (vd: "Dây cáp USB-C" thay vì đoán độ dài dây, "Túi đựng" thay vì đoán chất liệu).
-- Nếu không có ảnh nào rõ ràng là ảnh flat-lay phụ kiện, trả về danh sách rỗng.
+MAX_BOX_TAB_IMAGES = 3
+# Every gallery photo is shown (up to this many) so the hero / flat-lay can be
+# any of them; large galleries are sent at a smaller size to limit tokens.
+MAX_GALLERY_IMAGES = 16
+LARGE_GALLERY = 8
 
-Trả lời DUY NHẤT bằng JSON object hợp lệ, không kèm markdown code fence:
-{"found": true/false, "items": ["Vật thể 1", "Vật thể 2", ...]}"""
+SYSTEM_PROMPT = """Bạn là copywriter thương mại điện tử tiếng Việt cho vchannelstore.com - cửa hàng bán \
+thiết bị DJI chính hãng.
 
-SYSTEM_PROMPT = """Bạn là copywriter thương mại điện tử tiếng Việt cho vchannelstore.com, \
-chuyên bán lại thiết bị DJI chính hãng nhập từ nhà phân phối flycampro.vn.
+Nhiệm vụ: viết lại HOÀN TOÀN tiêu đề và mô tả sản phẩm từ nội dung gốc được cung cấp (đổi cấu trúc câu và \
+cách diễn đạt, không sao chép nguyên văn), văn phong tự nhiên, chuyên nghiệp, thuyết phục, hợp với khách mua \
+online tại Việt Nam.
 
-Nhiệm vụ: viết lại HOÀN TOÀN (không sao chép nguyên văn, đổi cấu trúc câu và cách diễn đạt) \
-tiêu đề và mô tả sản phẩm dựa trên nội dung gốc được cung cấp, giữ văn phong tự nhiên, \
-chuyên nghiệp, thuyết phục, phù hợp bán hàng online tại Việt Nam.
+Nguyên tắc về độ chính xác - quan trọng vì đây là trang bán hàng thật:
+- Chỉ dùng thông tin có trong nội dung gốc hoặc danh sách thông số. Không thêm tính năng, con số, khuyến mãi, \
+cam kết bảo hành hay quà tặng nào không có trong đó.
+- Mọi con số nhắc tới phải khớp chính xác với danh sách thông số.
+- Giữ nguyên tên riêng và tên model (DJI, Osmo Pocket 4, ActiveTrack...).
+- Không nhắc tới tên cửa hàng/nhà phân phối nguồn (flycampro) trong nội dung.
 
-QUY TẮC BẮT BUỘC:
-- Không bịa thêm bất kỳ thông số, tính năng, hay con số nào không có trong nội dung gốc hoặc \
-danh sách thông số kỹ thuật được cung cấp.
-- Nếu nhắc tới thông số kỹ thuật trong bài viết, số liệu phải khớp chính xác với danh sách thông số.
-- Không thêm khuyến mãi, cam kết bảo hành, hay bất kỳ thông tin nào không có trong nội dung gốc.
-- Giữ nguyên các tên riêng (DJI, tên dòng sản phẩm...).
+Cấu trúc kết quả:
+- title: tên sản phẩm kèm 1-3 điểm nổi bật ngắn gọn, tối đa khoảng 90 ký tự.
+- highlights: 3-6 câu ngắn nêu điểm nổi bật nhất, mỗi câu một ý.
+- sections: các phần của bài mô tả. Phần đầu là đoạn mở bài với heading rỗng; các phần sau có heading ngắn \
+(không viết hoa toàn bộ). Tổng độ dài tương đương bản gốc. Không đưa bảng thông số kỹ thuật vào đây."""
 
-Trả lời DUY NHẤT bằng một JSON object hợp lệ, không kèm markdown code fence, không giải thích \
-gì thêm, đúng format sau:
-{
-  "title": "Tiêu đề sản phẩm viết lại",
-  "short_description": "<ul><li>...</li>...</ul>",
-  "description": "<p>...</p><p>...</p>..."
+REWRITE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "highlights": {"type": "array", "items": {"type": "string"}},
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "heading": {"type": "string"},
+                    "paragraphs": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["heading", "paragraphs"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["title", "highlights", "sections"],
+    "additionalProperties": False,
 }
-"short_description" là 3-6 bullet điểm nổi bật nhất, viết dạng thẻ <ul><li>.
-"description" là mô tả chi tiết dạng các đoạn <p>, có thể thêm <h3> cho tiêu đề phụ nếu hợp lý, \
-độ dài tương đương bản gốc, KHÔNG bao gồm bảng thông số kỹ thuật (phần đó được thêm riêng)."""
+
+BOX_SYSTEM_PROMPT = """Bạn xem ảnh của một trang sản phẩm DJI để xác định phụ kiện đi kèm trong hộp.
+
+Nguồn thông tin, theo thứ tự ưu tiên:
+1. Ảnh chụp danh sách "Trong hộp có gì" (dạng chữ) - nếu có, chép lại đúng danh sách đó, dịch sang tiếng Việt \
+nếu là tiếng Anh, giữ nguyên số lượng ghi trên ảnh.
+2. Ảnh flat-lay: toàn bộ phụ kiện xếp riêng từng món trên nền trắng.
+
+Cách liệt kê:
+- Với ảnh flat-lay, chỉ liệt kê phụ kiện xung quanh (túi, dây đeo, chân đế, cáp, mic, tay cầm, nắp...), không \
+liệt kê thân máy chính và không đoán số hiệu model - số hiệu đọc qua ảnh nhỏ rất dễ sai.
+- Khi không đọc rõ chi tiết, mô tả chung chung ("Cáp USB-C" thay vì đoán độ dài; "Túi đựng" thay vì đoán chất liệu). \
+Không ghi các phương án kiểu "A hoặc B".
+- Nếu không có ảnh nào thuộc hai loại trên, trả về found = false và danh sách rỗng.
+
+Ngoài ra, chọn flatlay_image: số thứ tự N của ảnh gallery (nhãn "G<N>") chụp bày toàn bộ những gì khách nhận được trong hộp - thân máy cùng các phụ kiện xếp riêng từng món. Ảnh này sẽ làm ảnh đại diện cho combo, nên đừng chọn ảnh chỉ có thân máy hay ảnh infographic nhiều chữ nếu có ảnh flat-lay rõ hơn. Trả về 0 nếu gallery không có ảnh như vậy.
+
+Và chọn hero_image: số thứ tự N của ảnh gallery ("G<N>") dùng làm ảnh đại diện sản phẩm trên cửa hàng. Ảnh này phải đơn giản: chỉ có thân máy chính trên nền trắng, không có chữ, icon, huy hiệu hay bảng tính năng, không kèm phụ kiện. Trong các ảnh đạt yêu cầu, ưu tiên góc chụp nghiêng nhìn rõ mặt trước (ống kính, màn hình) của máy. Trả về 0 nếu không có ảnh nào đạt."""
+
+BOX_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "found": {"type": "boolean"},
+        "items": {"type": "array", "items": {"type": "string"}},
+        "flatlay_image": {"type": "integer"},
+        "hero_image": {"type": "integer"},
+    },
+    "required": ["found", "items", "flatlay_image", "hero_image"],
+    "additionalProperties": False,
+}
 
 
 class RewriteError(RuntimeError):
     pass
 
 
-def _build_user_prompt(title: str, description_text: str, spec_sections: list, box_contents_text: str) -> str:
-    specs_json = json.dumps(spec_sections, ensure_ascii=False)
-    parts = [
-        f"TIÊU ĐỀ GỐC:\n{title}\n",
-        f"MÔ TẢ GỐC:\n{description_text}\n",
-        "DANH SÁCH THÔNG SỐ KỸ THUẬT (chỉ để tham chiếu / kiểm tra số liệu, "
-        f"không đưa nguyên bảng vào description):\n{specs_json}\n",
-    ]
-    box_text = (box_contents_text or "").strip()
-    if box_text and box_text.upper() != "TRONG HỘP CÓ GÌ?":
-        parts.append(f"TRONG HỘP CÓ GÌ:\n{box_text}\n")
-    return "\n".join(parts)
+def make_client(api_key: str = "") -> "anthropic.Anthropic":
+    key = (api_key or os.environ.get("ANTHROPIC_API_KEY", "")).strip()
+    if not key:
+        raise RewriteError("Chưa có Anthropic API key - vào Cài đặt để điền rồi bấm 'Thử lại'.")
+    return anthropic.Anthropic(api_key=key, max_retries=3, timeout=300.0)
 
 
-def _parse_json_response(text: str) -> dict:
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
+def _call_structured(client, model: str, system: str, content, schema: dict, max_tokens: int, what: str) -> dict:
+    kwargs = dict(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": content}],
+        output_config={"format": {"type": "json_schema", "schema": schema}},
+    )
+    use_fallback = model in FALLBACK_MODELS
     try:
-        return json.loads(cleaned)
+        try:
+            if use_fallback:
+                response = client.messages.create(
+                    **kwargs,
+                    extra_headers={"anthropic-beta": FALLBACK_BETA},
+                    extra_body={"fallbacks": "default"},
+                )
+            else:
+                response = client.messages.create(**kwargs)
+        except anthropic.BadRequestError as e:
+            if not use_fallback or "fallback" not in str(e.message).lower():
+                raise
+            response = client.messages.create(**kwargs)  # account without the fallback beta
+    except anthropic.AuthenticationError as e:
+        raise RewriteError("Anthropic API key không hợp lệ - kiểm tra lại trong Cài đặt.") from e
+    except anthropic.NotFoundError as e:
+        raise RewriteError(f"Model '{model}' không tồn tại hoặc tài khoản không có quyền dùng.") from e
+    except anthropic.RateLimitError as e:
+        raise RewriteError("Anthropic API đang giới hạn tốc độ (rate limit) - thử lại sau ít phút.") from e
+    except anthropic.APIStatusError as e:
+        raise RewriteError(f"Lỗi Anthropic API khi {what} ({e.status_code}): {e.message}") from e
+    except anthropic.APIConnectionError as e:
+        raise RewriteError(f"Không kết nối được tới Anthropic API khi {what}: {e}") from e
+
+    if response.stop_reason == "refusal":
+        raise RewriteError(f"Claude từ chối xử lý yêu cầu {what}.")
+    if response.stop_reason == "max_tokens":
+        raise RewriteError(f"Nội dung trả về bị cắt giữa chừng khi {what} (vượt max_tokens).")
+    text = next((b.text for b in response.content if b.type == "text"), "")
+    try:
+        return json.loads(text)
     except json.JSONDecodeError as e:
-        raise RewriteError(
-            f"Claude không trả về JSON hợp lệ: {e}\nRaw response (rút gọn): {text[:1000]}"
-        ) from e
+        raise RewriteError(f"Claude trả về JSON không hợp lệ khi {what}: {text[:300]}") from e
+
+
+def _build_user_prompt(title: str, description_text: str, spec_sections: list, box_contents_text: str) -> str:
+    parts = [
+        f"<tieu_de_goc>\n{title}\n</tieu_de_goc>",
+        f"<mo_ta_goc>\n{description_text}\n</mo_ta_goc>"
+        if (description_text or "").strip()
+        else "<mo_ta_goc>\n(Trang gốc không có mô tả. Chỉ viết ngắn gọn 1-2 đoạn dựa trên tên sản phẩm và danh sách "
+        "thông số; không thêm công dụng, tính năng hay thông tin nào khác.)\n</mo_ta_goc>",
+        "<thong_so>\n" + json.dumps(spec_sections, ensure_ascii=False) + "\n</thong_so>",
+    ]
+    if (box_contents_text or "").strip():
+        parts.append(f"<trong_hop>\n{box_contents_text.strip()}\n</trong_hop>")
+    parts.append("Viết lại nội dung cho sản phẩm trên.")
+    return "\n\n".join(parts)
+
+
+def structured_to_html(data: dict) -> dict:
+    title = " ".join(str(data.get("title", "")).split())
+    highlights = [str(h).strip() for h in data.get("highlights", []) if str(h).strip()]
+    blocks = []
+    for section in data.get("sections", []):
+        heading = str(section.get("heading", "")).strip()
+        paragraphs = [str(p).strip() for p in section.get("paragraphs", []) if str(p).strip()]
+        if heading and paragraphs:
+            blocks.append(f"<h3>{escape(heading)}</h3>")
+        blocks.extend(f"<p>{escape(p)}</p>" for p in paragraphs)
+    result = {
+        "title": title,
+        "short_description": "<ul>" + "".join(f"<li>{escape(h)}</li>" for h in highlights) + "</ul>" if highlights else "",
+        "description": "\n".join(blocks),
+    }
+    for key in ("title", "short_description", "description"):
+        if not result[key]:
+            raise RewriteError(f"Claude trả về thiếu nội dung '{key}'.")
+    return result
 
 
 def rewrite_content(
@@ -96,64 +200,93 @@ def rewrite_content(
     spec_sections: list,
     box_contents_text: str = "",
 ) -> dict:
-    user_prompt = _build_user_prompt(title, description_text, spec_sections, box_contents_text)
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-    except anthropic.APIStatusError as e:
-        raise RewriteError(f"Lỗi gọi Anthropic API ({e.status_code}): {e.message}") from e
-    except anthropic.APIConnectionError as e:
-        raise RewriteError(f"Lỗi kết nối tới Anthropic API: {e}") from e
-
-    text = next((b.text for b in response.content if b.type == "text"), "")
-    if not text:
-        raise RewriteError("Claude không trả về nội dung text nào.")
-
-    data = _parse_json_response(text)
-    for key in ("title", "short_description", "description"):
-        if key not in data or not str(data[key]).strip():
-            raise RewriteError(f"Thiếu field '{key}' trong JSON trả về từ Claude.")
-    return data
+    """Return {"title", "short_description", "description"} as HTML strings."""
+    data = _call_structured(
+        client,
+        model,
+        SYSTEM_PROMPT,
+        _build_user_prompt(title, description_text, spec_sections, box_contents_text),
+        REWRITE_SCHEMA,
+        max_tokens=16000,
+        what="viết lại nội dung",
+    )
+    return structured_to_html(data)
 
 
-def describe_box_contents(client: "anthropic.Anthropic", model: str, image_paths: list) -> str:
-    """Ask Claude to find the accessories flat-lay among the given images (if
-    any) and list what's visibly in it, as an HTML bullet list. Returns ""
-    when no such image is found - callers should fall back gracefully."""
+def _image_block(data: bytes, max_side: int = 1568) -> dict:
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": base64.standard_b64encode(to_vision_jpeg(data, max_side)).decode("ascii"),
+        },
+    }
+
+
+def describe_box_contents(
+    client: "anthropic.Anthropic",
+    model: str,
+    image_paths: list,
+    box_image_urls: list = (),
+    box_contents_text: str = "",
+) -> dict:
+    """Return {"items": [...], "flatlay_index": int|None, "hero_index": int|None}.
+
+    items is [] when nothing reliable was found. flatlay_index is the 0-based
+    position in image_paths of the photo showing everything in the box (used
+    as the combo's own image); hero_index is the plain device-only photo used
+    as the product's main image. box_image_urls are images from the page's
+    "Trong hộp có gì" tab (often a screenshot of the official list) and are
+    shown to Claude first."""
     content = []
-    for i, path in enumerate(image_paths, start=1):
-        p = Path(path)
-        mime = mimetypes.guess_type(p.name)[0] or "image/png"
-        data = base64.standard_b64encode(p.read_bytes()).decode("utf-8")
-        content.append({"type": "text", "text": f"Ảnh {i}:"})
-        content.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
-    content.append({"type": "text", "text": "Tìm ảnh flat-lay phụ kiện (nếu có) và liệt kê nội dung."})
+    n = 0
+    shown_gallery = 0
+    for url in list(box_image_urls)[:MAX_BOX_TAB_IMAGES]:
+        try:
+            data = fetch_image_bytes(url)
+        except ImageDownloadError:
+            continue
+        n += 1
+        content.append({"type": "text", "text": f"Ảnh T{n} (tab 'Trong hộp có gì'):"})
+        content.append(_image_block(data))
+    side = 1024 if len(image_paths) > LARGE_GALLERY else 1568
+    for path in list(image_paths)[:MAX_GALLERY_IMAGES]:
+        n += 1
+        shown_gallery += 1
+        content.append({"type": "text", "text": f"Ảnh G{shown_gallery} (gallery sản phẩm):"})
+        content.append(_image_block(Path(path).read_bytes(), side))
+    if n == 0:
+        return {"items": [], "flatlay_index": None, "hero_index": None}
+    if (box_contents_text or "").strip():
+        content.append({"type": "text", "text": f"Văn bản 'Trong hộp có gì' trên trang:\n{box_contents_text.strip()}"})
+    content.append({"type": "text", "text": "Liệt kê phụ kiện trong hộp."})
 
+    data = _call_structured(
+        client, model, BOX_SYSTEM_PROMPT, content, BOX_SCHEMA, max_tokens=12000, what="đọc phụ kiện trong hộp"
+    )
+    def gallery_index(value):
+        return value - 1 if isinstance(value, int) and 1 <= value <= shown_gallery else None
+
+    items = [str(i).strip() for i in data.get("items", []) if str(i).strip()] if data.get("found") else []
+    return {
+        "items": items,
+        "flatlay_index": gallery_index(data.get("flatlay_image")),
+        "hero_index": gallery_index(data.get("hero_image")),
+    }
+
+
+def check_api(api_key: str, model: str) -> str:
+    """Cheap connectivity check - retrieves the model, no tokens spent."""
+    client = anthropic.Anthropic(api_key=api_key or None, max_retries=0, timeout=20.0)
     try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=BOX_CONTENTS_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content}],
-        )
+        info = client.models.retrieve(model)
+    except anthropic.AuthenticationError as e:
+        raise RewriteError("API key không hợp lệ.") from e
+    except anthropic.NotFoundError as e:
+        raise RewriteError(f"Không tìm thấy model '{model}'.") from e
     except anthropic.APIStatusError as e:
-        raise RewriteError(f"Lỗi gọi Anthropic API (vision, {e.status_code}): {e.message}") from e
+        raise RewriteError(f"Lỗi ({e.status_code}): {e.message}") from e
     except anthropic.APIConnectionError as e:
-        raise RewriteError(f"Lỗi kết nối tới Anthropic API (vision): {e}") from e
-
-    text = next((b.text for b in response.content if b.type == "text"), "")
-    if not text:
-        raise RewriteError("Claude không trả về nội dung text nào (vision).")
-
-    data = _parse_json_response(text)
-    if not data.get("found") or not data.get("items"):
-        return ""
-    items = [str(item).strip() for item in data["items"] if str(item).strip()]
-    if not items:
-        return ""
-    lis = "".join(f"<li>{item}</li>" for item in items)
-    return f"<p><strong>Trong hộp có gì:</strong></p><ul>{lis}</ul>"
+        raise RewriteError(f"Không kết nối được: {e}") from e
+    return getattr(info, "display_name", None) or model

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Lỗi {{ code }}{% endblock %}
+{% block content %}
+<section class="card" style="max-width:520px;margin:48px auto">
+  <div class="hero-state">
+    <div class="hero-icon neutral">{{ icon("alert-circle") }}</div>
+    <h2>{{ "Không tìm thấy trang" if code == 404 else "Không thể truy cập" }}</h2>
+    <p>{{ message or "Đã có lỗi xảy ra." }}</p>
+    <div class="actions"><a class="btn btn-primary" href="/">{{ icon("dashboard") }} Về trang tổng quan</a></div>
+  </div>
+</section>
+{% endblock %}

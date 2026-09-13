@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Cài đặt{% endblock %}
+{% block content_class %}narrow{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Cài đặt</h1>
+    <p class="sub">Kết nối website, AI và giá trị mặc định. Thông tin được lưu trong file <code>.env</code> trên máy này.</p>
+  </div>
+</div>
+
+{% set groups = [
+  ("woocommerce", "Website WooCommerce", "store", "Dùng để tạo sản phẩm, biến thể, đọc danh mục. Tạo key tại WooCommerce › Settings › Advanced › REST API với quyền Read/Write."),
+  ("wordpress", "Upload ảnh (WordPress)", "image", "WooCommerce key không upload ảnh được - cần một tài khoản WordPress kèm Application Password."),
+  ("anthropic", "AI viết nội dung", "sparkles", "Claude viết lại tên, mô tả và đọc ảnh phụ kiện trong hộp."),
+  ("defaults", "Mặc định khi nhập", "settings", "Giá trị điền sẵn ở trang Nhập sản phẩm - vẫn đổi được cho từng lần."),
+] %}
+
+<form id="settings-form" autocomplete="off">
+{% for key, title, ic, desc in groups %}
+  <section class="settings-section" data-group="{{ key }}">
+    <div>
+      <h2>{{ icon(ic) }} {{ title }}</h2>
+      <p class="desc">{{ desc }}</p>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        {% for f in fields if f.group == key %}
+          {% if f.key == "ANTHROPIC_MODEL" %}
+          <div class="field">
+            <span class="label">{{ f.label }}</span>
+            <div class="stack-sm" id="model-choices">
+              {% for value, name, note in models %}
+              <label class="radio-card" data-model="{{ value }}">
+                <input type="radio" name="ANTHROPIC_MODEL" value="{{ value }}">
+                <div><b>{{ name }}</b><span>{{ note }} · <code>{{ value }}</code></span></div>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          {% elif f.key == "WC_PRODUCT_STATUS" %}
+          <div class="field">
+            <label class="label" for="f-{{ f.key }}">{{ f.label }}</label>
+            <select class="select" id="f-{{ f.key }}" name="{{ f.key }}">
+              {% for value, label in statuses %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+            </select>
+          </div>
+          {% else %}
+          <div class="field">
+            <label class="label" for="f-{{ f.key }}">{{ f.label }}
+              {% if f.secret %}<span class="opt" data-secret-state="{{ f.key }}"></span>{% endif %}
+            </label>
+            <div class="input-group">
+              <input class="input {{ 'mono' if f.secret else '' }}" id="f-{{ f.key }}" name="{{ f.key }}"
+                     type="{{ 'password' if f.secret else 'text' }}" placeholder="{{ f.placeholder }}"
+                     {% if f.key == 'PRICE_DISCOUNT_VND' %}inputmode="numeric"{% endif %} spellcheck="false">
+              {% if f.secret %}
+              <button type="button" class="btn btn-ghost btn-icon btn-sm input-btn" data-reveal="{{ f.key }}" title="Hiện/ẩn" aria-label="Hiện hoặc ẩn giá trị">{{ icon("eye", "i-sm") }}</button>
+              {% elif f.key == 'PRICE_DISCOUNT_VND' %}
+              <span class="suffix">đ</span>
+              {% endif %}
+            </div>
+            {% if f.help %}<div class="help">{{ f.help }}</div>{% endif %}
+          </div>
+          {% endif %}
+        {% endfor %}
+        <div id="test-{{ key }}"></div>
+      </div>
+      {% if key != "defaults" %}
+      <div class="card-foot row between">
+        <span class="small faint" data-status="{{ key }}"></span>
+        <button type="button" class="btn btn-secondary btn-sm" data-test="{{ key }}">{{ icon("check-circle") }} Kiểm tra kết nối</button>
+      </div>
+      {% endif %}
+    </div>
+  </section>
+{% endfor %}
+
+  <div class="savebar" id="savebar" hidden>
+    <span class="strong">Bạn có thay đổi chưa lưu</span>
+    <div class="row">
+      <button type="button" class="btn btn-ghost btn-sm" id="discard">Huỷ thay đổi</button>
+      <button type="submit" class="btn btn-primary" id="save">{{ icon("save") }} Lưu cài đặt</button>
+    </div>
+  </div>
+</form>
+<p class="small faint mt-24" id="env-path"></p>
+{% endblock %}
+{% block scripts %}<script type="module" src="{{ url_for('static', filename='js/settings.js') }}?v={{ version }}"></script>{% endblock %}

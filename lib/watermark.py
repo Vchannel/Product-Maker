@@ -1,55 +1,348 @@
 """Remove the flycampro.vn logo from downloaded product photos.
 
-Every product photo on flycampro.vn carries a "FLYCAM PRO.VN" logo in the
-top-left corner on a plain white background. Rather than cropping (which
-would shift/resize the whole image and risks clipping real product content
-on layouts where items sit close to that corner), this auto-detects the
-logo's bounding box and paints over it with the sampled background color -
-same canvas size, no layout shift.
+Product photos on flycampro.vn carry a "FLYCAM PRO.VN" logo near the top-left
+corner. Two detectors, tried in order:
+
+1. Template match (lib/assets/flycampro_logo*.png). The logo artwork is fixed
+   but stamped at different sizes and with slightly different rendering
+   (recent 1500×1000 photos vs older, JPEG-compressed 1200×800 ones), so every
+   photo is searched with each template over a range of logo sizes, then the
+   size is refined. Only the logo's own pixels are compared, so accessories
+   touching or overlapping the logo don't disturb the match, and only the
+   logo footprint is rebuilt from neighbouring pixels - a product touching the
+   logo keeps its shape instead of getting a white notch.
+
+2. Cluster fallback for logo variants no template matches: paints a
+   rectangle over an isolated, logo-sized cluster on a flat background, and
+   leaves the photo untouched when product content runs into that corner.
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-SEARCH_FRAC_W = 0.22
-SEARCH_FRAC_H = 0.28
-BG_TOLERANCE = 24  # per-channel; a pixel counts as "logo" if it differs more than this from bg
+ALGORITHM_VERSION = 5
+
+ASSETS = Path(__file__).parent / "assets"
+TEMPLATE_PATH = ASSETS / "flycampro_logo.png"  # from a recent 1500×1000 photo (logo ≈187 px wide)
+TEMPLATE_PATHS = (TEMPLATE_PATH, ASSETS / "flycampro_logo_old.png")  # old: from a 1200×800 JPEG photo
+# Coarse logo sizes, as a factor of each template's own pixel size.
+SCALES = tuple(float(s) for s in np.geomspace(0.5, 1.7, 17))
+REFINE = (0.96, 0.98, 1.0, 1.02, 1.04)
+# Mean abs RGB difference over the logo's solid pixels: real logos score
+# ~0-35 (native, rescaled, JPEG); photos without the logo score ≥ ~50.
+MATCH_MAX_ERROR = 45.0
+SEARCH_FRAC = 0.42  # the logo's top-left corner lies within this share of the photo
+
+SEARCH_FRAC_W = 0.24
+SEARCH_FRAC_H = 0.30
+BG_TOLERANCE = 24  # per channel
+BG_MAX_STD = 6.0
+GAP_FRAC = 0.012  # min empty gap (fraction of width) that separates clusters
 PADDING = 6
+MIN_LOGO_FRAC = 0.03
+MAX_LOGO_W_FRAC = 0.20
+MAX_LOGO_H_FRAC = 0.24
 
 
-def _sample_background_color(arr: np.ndarray) -> np.ndarray:
-    """Sample from the top-right corner, which is never covered by the
-    top-left logo or by centered/right-leaning product content."""
+@dataclass
+class LogoResult:
+    removed: bool
+    box: Optional[tuple] = None  # (x0, y0, x1, y1)
+    reason: str = ""
+    method: str = ""
+    mask: Optional[np.ndarray] = None  # template method: logo footprint, relative to box
+    error: Optional[float] = None
+    scale: Optional[float] = None
+    template: Optional[str] = None
+
+
+# --------------------------------------------------------------------------
+# 1. template match
+# --------------------------------------------------------------------------
+@lru_cache(maxsize=4)
+def _base_template(index: int) -> Optional[Image.Image]:
+    path = TEMPLATE_PATHS[index]
+    return Image.open(path).convert("RGB") if path.exists() else None
+
+
+@lru_cache(maxsize=512)
+def _template(index: int, scale_key: int):
+    """(rgb float array, halo mask, solid mask) of template `index` at scale_key / 1000."""
+    base = _base_template(index)
+    if base is None:
+        return None
+    scale = scale_key / 1000
+    tpl = base
+    if abs(scale - 1) > 0.005:
+        size = (max(8, round(base.width * scale)), max(8, round(base.height * scale)))
+        tpl = base.resize(size, Image.LANCZOS)
+    t = np.asarray(tpl).astype(np.float32)
+    ink = (255 - t).max(axis=2)
+    return t, ink > 12, ink > 90
+
+
+def _masked_error(region: np.ndarray, t: np.ndarray, solid: np.ndarray, step: int, rows, cols) -> tuple:
+    """Best (error, y, x) over rows × cols: mean abs difference on the
+    template's solid pixels, one numpy call per row of x offsets."""
+    ys, xs = np.nonzero(solid[::step, ::step])
+    ys, xs = ys * step, xs * step
+    tv = t[ys, xs][:, None, :]  # (pixels, 1, 3)
+    cols = np.asarray(list(cols))
+    if cols.size == 0:
+        return (np.inf, 0, 0)
+    col_idx = xs[:, None] + cols[None, :]
+    best = (np.inf, 0, 0)
+    for y in rows:
+        err = np.abs(region[y + ys[:, None], col_idx] - tv).mean(axis=(0, 2))
+        i = int(err.argmin())
+        if err[i] < best[0]:
+            best = (float(err[i]), y, int(cols[i]))
+    return best
+
+
+class _FFTRegion:
+    """FFTs of one search region, reused for every template and size:
+    sum M(I-T)^2 = corr(I^2, M) - 2 corr(I, M*T) + sum M*T^2."""
+
+    def __init__(self, region: np.ndarray):
+        self.shape = region.shape[:2]
+        img = region.astype(np.float64)
+        self.f_img = [np.fft.rfft2(img[..., c]) for c in range(3)]
+        self.f_sq = [np.fft.rfft2(img[..., c] ** 2) for c in range(3)]
+
+    def ssd_map(self, t: np.ndarray, mask: np.ndarray) -> Optional[np.ndarray]:
+        H, W = self.shape
+        h, w = mask.shape
+        if h > H or w > W:
+            return None
+        m = mask.astype(np.float64)
+        f_m = np.fft.rfft2(m[::-1, ::-1], s=self.shape)
+        total = None
+        const = 0.0
+        for c in range(3):
+            tm = t[..., c].astype(np.float64) * m
+            f_tm = np.fft.rfft2(tm[::-1, ::-1], s=self.shape)
+            part = self.f_sq[c] * f_m - 2 * self.f_img[c] * f_tm
+            total = part if total is None else total + part
+            const += float((tm * t[..., c]).sum())
+        spatial = np.fft.irfft2(total, s=self.shape)[h - 1 : H, w - 1 : W]
+        return (spatial + const) / max(1.0, m.sum() * 3)
+
+
+def _match_template(arr: np.ndarray) -> Optional[tuple]:
+    """Return (box, halo_mask, error, scale, template_index) for the best logo
+    placement, or None."""
+    indices = [i for i in range(len(TEMPLATE_PATHS)) if _base_template(i) is not None]
+    if not indices:
+        return None
     h, w, _ = arr.shape
-    patch = arr[2 : min(10, h), max(0, w - 10) : w]
-    return patch.reshape(-1, 3).mean(axis=0)
+    largest_h = max(_template(i, round(SCALES[-1] * 1000))[2].shape[0] for i in indices)
+    largest_w = max(_template(i, round(SCALES[-1] * 1000))[2].shape[1] for i in indices)
+    sh = min(h, int(h * SEARCH_FRAC) + largest_h)
+    sw = min(w, int(w * SEARCH_FRAC) + largest_w)
+    region = arr[:sh, :sw].astype(np.float32)
+
+    # Coarse: every template × size × offset on a half-resolution copy (FFT).
+    half = region[: sh // 2 * 2, : sw // 2 * 2]
+    half = (half[0::2, 0::2] + half[1::2, 0::2] + half[0::2, 1::2] + half[1::2, 1::2]) / 4
+    fft_half = _FFTRegion(half)
+    coarse = []
+    for index in indices:
+        for scale in SCALES:
+            t_half, _halo, solid_half = _template(index, round(scale * 500))
+            if solid_half.sum() < 20:
+                continue
+            ssd = fft_half.ssd_map(t_half, solid_half)
+            if ssd is None:
+                continue
+            cy, cx = (int(v) for v in np.unravel_index(int(ssd.argmin()), ssd.shape))
+            coarse.append((float(ssd[cy, cx]), index, scale, cy * 2, cx * 2))
+    if not coarse:
+        return None
+    coarse.sort()
+
+    # Fine: full resolution, mean-abs error, around the best coarse hits, with
+    # the logo size refined in small steps.
+    best = None
+    for _ssd, index, scale, cy, cx in coarse[:3]:
+        for factor in REFINE:
+            s = scale * factor
+            t, halo, solid = _template(index, round(s * 1000))
+            th, tw = solid.shape
+            if th > sh or tw > sw:
+                continue
+            reach = 4
+            err, y, x = _masked_error(
+                region,
+                t,
+                solid,
+                1,
+                range(max(0, cy - reach), min(sh - th, cy + reach) + 1),
+                range(max(0, cx - reach), min(sw - tw, cx + reach) + 1),
+            )
+            if best is None or err < best[0]:
+                best = (err, y, x, s, index, halo, th, tw)
+    if best is None or best[0] > MATCH_MAX_ERROR:
+        return None
+    err, y, x, s, index, halo, th, tw = best
+    return (x, y, x + tw - 1, y + th - 1), halo, err, s, index
 
 
-def remove_top_left_logo(image_path: str) -> bool:
-    """Detect and paint over the top-left logo in place. Returns True if a
-    logo-like region was found and removed, False if the image was already
-    clean (safe to call repeatedly / on already-cleaned files)."""
-    img = Image.open(image_path).convert("RGB")
-    arr = np.array(img)
+def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
+    out = mask.copy()
+    h, w = mask.shape
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy == 0 and dx == 0:
+                continue
+            out[max(0, dy) : h + min(0, dy), max(0, dx) : w + min(0, dx)] |= mask[
+                max(0, -dy) : h + min(0, -dy), max(0, -dx) : w + min(0, -dx)
+            ]
+    return out
+
+
+def _inpaint(img: np.ndarray, hole: np.ndarray, max_iter: int = 400) -> np.ndarray:
+    """Fill `hole` pixels by repeatedly averaging already-known 8-neighbours,
+    so white background stays white and an accessory under the logo is
+    continued with its own colour."""
+    out = img.astype(np.float32).copy()
+    known = ~hole
+    h, w = hole.shape
+    shifts = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    for _ in range(max_iter):
+        if known.all():
+            break
+        total = np.zeros_like(out)
+        count = np.zeros((h, w), dtype=np.float32)
+        for dy, dx in shifts:
+            src_y = slice(max(0, -dy), h - max(0, dy))
+            dst_y = slice(max(0, dy), h - max(0, -dy))
+            src_x = slice(max(0, -dx), w - max(0, dx))
+            dst_x = slice(max(0, dx), w - max(0, -dx))
+            k = known[src_y, src_x]
+            total[dst_y, dst_x] += out[src_y, src_x] * k[..., None]
+            count[dst_y, dst_x] += k
+        frontier = (~known) & (count > 0)
+        if not frontier.any():
+            break
+        out[frontier] = total[frontier] / count[frontier][:, None]
+        known = known | frontier
+    return out
+
+
+# --------------------------------------------------------------------------
+# 2. cluster fallback
+# --------------------------------------------------------------------------
+def _runs(active: np.ndarray, min_gap: int) -> list:
+    """Split a 1-D boolean array into [start, end] runs, merging runs whose
+    gap is smaller than min_gap."""
+    idx = np.flatnonzero(active)
+    if idx.size == 0:
+        return []
+    runs = [[int(idx[0]), int(idx[0])]]
+    for i in idx[1:]:
+        i = int(i)
+        if i - runs[-1][1] <= min_gap:
+            runs[-1][1] = i
+        else:
+            runs.append([i, i])
+    return runs
+
+
+def _detect_cluster(arr: np.ndarray) -> LogoResult:
     h, w, _ = arr.shape
+    patch = arr[2 : min(12, h), max(0, w - 12) : w].reshape(-1, 3).astype(float)
+    bg = patch.mean(axis=0)
+    if patch.std(axis=0).max() > BG_MAX_STD:
+        return LogoResult(False, reason="nền không đồng nhất")
 
-    bg = _sample_background_color(arr)
-
-    sh = int(h * SEARCH_FRAC_H)
-    sw = int(w * SEARCH_FRAC_W)
-    region = arr[0:sh, 0:sw].astype(int)
-    diff = np.abs(region - bg.astype(int)).sum(axis=2)
-    mask = diff > BG_TOLERANCE * 3
-
+    sh, sw = int(h * SEARCH_FRAC_H), int(w * SEARCH_FRAC_W)
+    region = arr[:sh, :sw].astype(int)
+    mask = np.abs(region - bg.astype(int)).max(axis=2) > BG_TOLERANCE
     if not mask.any():
-        return False
+        return LogoResult(False, reason="không có logo")
 
-    ys, xs = np.where(mask)
-    y0, y1 = max(0, int(ys.min()) - PADDING), min(sh - 1, int(ys.max()) + PADDING)
-    x0, x1 = max(0, int(xs.min()) - PADDING), min(sw - 1, int(xs.max()) + PADDING)
+    gap = max(8, int(w * GAP_FRAC))
+    for x0, x1 in _runs(mask.any(axis=0), gap):
+        if x1 >= sw - 2:
+            continue  # cluster touches the right edge of the window: product content
+        sub = mask[:, x0 : x1 + 1]
+        y_runs = [r for r in _runs(sub.any(axis=1), gap) if r[1] < sh - 2]
+        if not y_runs:
+            continue
+        y0, y1 = max(y_runs, key=lambda r: sub[r[0] : r[1] + 1].sum())
+        cols = np.flatnonzero(mask[y0 : y1 + 1, x0 : x1 + 1].any(axis=0))
+        bx0, bx1 = x0 + int(cols[0]), x0 + int(cols[-1])
+        bw, bh = bx1 - bx0 + 1, y1 - y0 + 1
+        if bw < w * MIN_LOGO_FRAC or bh < h * MIN_LOGO_FRAC:
+            continue
+        if bw > w * MAX_LOGO_W_FRAC or bh > h * MAX_LOGO_H_FRAC:
+            continue
+        box = (max(0, bx0 - PADDING), max(0, y0 - PADDING), min(sw - 1, bx1 + PADDING), min(sh - 1, y1 + PADDING))
+        return LogoResult(True, box=box, method="cluster")
+    return LogoResult(False, reason="không tìm thấy vùng giống logo")
 
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([x0, y0, x1, y1], fill=tuple(int(c) for c in bg))
-    img.save(image_path)
-    return True
+
+# --------------------------------------------------------------------------
+def detect_logo(img: Image.Image) -> LogoResult:
+    arr = np.asarray(img.convert("RGB"))
+    h, w, _ = arr.shape
+    if w < 200 or h < 200:
+        return LogoResult(False, reason="ảnh quá nhỏ")
+    match = _match_template(arr)
+    if match:
+        box, halo, err, scale, index = match
+        return LogoResult(
+            True, box=box, method="template", mask=halo, error=err, scale=scale, template=TEMPLATE_PATHS[index].name
+        )
+    return _detect_cluster(arr)
+
+
+def remove_logo(src_path: str, dest_path: str) -> LogoResult:
+    """Write a logo-free copy of src_path to dest_path (always writes, so the
+    destination exists even when nothing was removed)."""
+    with Image.open(src_path) as im:
+        im.load()
+        fmt = (im.format or "").upper()
+        result = detect_logo(im)
+        out = im
+        if result.removed:
+            if im.mode not in ("RGB", "RGBA"):
+                out = im.convert("RGBA" if "transparency" in im.info or im.mode in ("LA", "P") else "RGB")
+            if result.method == "template":
+                x0, y0, x1, y1 = result.box
+                # Rebuild the logo's anti-aliased footprint grown a little: the logo
+                # sits at sub-pixel offsets, bigger stamps have wider soft edges, and
+                # JPEG ringing spreads further - an exact footprint leaves a ghost.
+                radius = 2 + int(x1 - x0 >= 230) + int(fmt == "JPEG")
+                footprint = _dilate(result.mask, radius)
+                pad = 8
+                h, w = out.height, out.width
+                bx0, by0, bx1, by1 = max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + 1 + pad), min(h, y1 + 1 + pad)
+                data = np.asarray(out).copy()
+                hole = np.zeros((by1 - by0, bx1 - bx0), dtype=bool)
+                oy, ox = y0 - by0, x0 - bx0
+                fh = min(footprint.shape[0], hole.shape[0] - oy)
+                fw = min(footprint.shape[1], hole.shape[1] - ox)
+                hole[oy : oy + fh, ox : ox + fw] = footprint[:fh, :fw]
+                patch = _inpaint(data[by0:by1, bx0:bx1], hole)
+                data[by0:by1, bx0:bx1] = np.clip(np.rint(patch), 0, 255).astype(np.uint8)
+                out = Image.fromarray(data, mode=out.mode)
+            else:
+                bands = len(out.getbands())
+                bg = np.asarray(out)[2:12, -12:].reshape(-1, bands).mean(axis=0)
+                ImageDraw.Draw(out).rectangle(result.box, fill=tuple(int(round(c)) for c in bg))
+        save_kwargs = {}
+        if fmt == "JPEG":
+            save_kwargs = {"quality": 95, "subsampling": 0}
+            if out.mode != "RGB":
+                out = out.convert("RGB")
+        out.save(dest_path, format=fmt or None, **save_kwargs)
+    result.mask = None
+    return result

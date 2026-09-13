@@ -1,137 +1,142 @@
-# flycampro → WooCommerce Product Importer
+# Product Maker · VCHANNEL
 
-Tự động lấy sản phẩm từ **flycampro.vn** (nhà phân phối DJI), viết lại nội dung
-bằng Claude, và tạo sản phẩm mới trên WooCommerce của **vchannelstore.com**.
+Ứng dụng web chạy trên máy tính để **nhập sản phẩm DJI từ flycampro.vn lên WooCommerce của vchannelstore.com**:
+tải dữ liệu → xoá logo trên ảnh → AI (Claude) viết lại nội dung → **bạn duyệt & chỉnh sửa** → đăng sản phẩm.
 
-## 1. Cài đặt
+## Tính năng chính
 
-```bash
-pip install -r requirements.txt
-```
+- **Xem trước ngay khi dán link**: tên, giá sau giảm, số ảnh, số dòng thông số, cách gộp phiên bản.
+- **Gộp nhiều combo thành 1 sản phẩm nhiều phiên bản**: mỗi phiên bản có giá, ảnh, SKU và danh sách "Trong hộp có gì" riêng.
+- **Bước duyệt nội dung**, tự động lưu bản nháp:
+  - Sửa tên, mô tả ngắn và mô tả chi tiết (trình soạn thảo có chế độ HTML).
+  - Kéo-thả sắp xếp ảnh, chọn ảnh đại diện, so sánh ảnh gốc với ảnh đã xoá logo.
+  - Sửa giá, phiên bản, phụ kiện, danh mục, tag, trạng thái.
+  - Xem trước giao diện như trên cửa hàng.
+- **Theo dõi tiến trình trực tiếp**: 6 bước kèm nhật ký chi tiết. Có thể huỷ, thử lại từ bước bị lỗi, hoặc mở lại bản nháp.
+- **Không tạo trùng, không upload trùng**:
+  - Nhận biết sản phẩm đã có theo SKU. Tuỳ chọn *giữ nguyên, chỉ thêm phiên bản còn thiếu* hoặc *cập nhật toàn bộ*.
+  - Ảnh đã upload lên WordPress được dùng lại.
+- **Trang Sản phẩm**: danh sách sản phẩm đã nhập, đồng bộ trạng thái mới nhất từ website.
+- **Trang Cài đặt**: điền key ngay trên giao diện, có nút *Kiểm tra kết nối* cho từng dịch vụ. Key được che, không hiện đầy đủ.
+- Giao diện sáng/tối, dùng được trên điện thoại/tablet trong cùng máy.
 
-## 2. Cấu hình `.env`
+## 1. Chạy ứng dụng
 
-Copy file mẫu rồi điền thông tin:
+**macOS**: double-click `start_webapp.command`.
+**Windows**: double-click `start_webapp.bat`.
 
-```bash
-cp .env.example .env
-```
+Lần đầu, script tự tạo môi trường Python (`.venv`) và cài thư viện (mất 1–2 phút). Sau đó trình duyệt tự mở
+**http://127.0.0.1:8686**. Giữ cửa sổ dòng lệnh mở trong lúc dùng; đóng cửa sổ (hoặc Ctrl+C) để tắt.
 
-Cần **4 nhóm thông tin**, tất cả đều bắt buộc:
-
-### a) WooCommerce REST API (để tạo sản phẩm)
-Vào **WooCommerce > Settings > Advanced > REST API > Add key**, chọn quyền
-**Read/Write**, lấy `Consumer Key` / `Consumer Secret` điền vào
-`WC_CONSUMER_KEY` / `WC_CONSUMER_SECRET`.
-
-### b) WordPress Application Password (để upload ảnh)
-Đây là thông tin **khác** với key ở trên — WooCommerce key chỉ gọi được API
-`wc/v3/*`, còn upload ảnh cần API lõi WordPress `wp/v2/media` nên phải xác
-thực bằng một user WordPress thật:
-
-1. Vào **wp-admin > Users > hồ sơ của bạn (Profile)**
-2. Kéo xuống mục **Application Passwords**, đặt tên (vd: `flycampro-importer`), bấm **Add New**
-3. Copy chuỗi mật khẩu được sinh ra (dạng `xxxx xxxx xxxx xxxx xxxx xxxx`) vào
-   `WP_APP_PASSWORD`, và username tương ứng vào `WP_USERNAME`
-
-> Site phải chạy HTTPS để Application Passwords hoạt động (mặc định WordPress
-> chặn tính năng này trên HTTP).
-
-### c) Anthropic API key
-Điền `ANTHROPIC_API_KEY` (lấy tại console.anthropic.com). Model dùng để
-rewrite nội dung đọc từ `ANTHROPIC_MODEL` (mặc định `claude-sonnet-4-6`).
-
-### d) Giá bán (tuỳ chọn)
-`PRICE_DISCOUNT_VND` (mặc định `45000`): script set
-`regular_price` = giá gốc lấy từ flycampro.vn, và
-`sale_price` = giá gốc − số tiền này, để hiển thị như đang có khuyến mãi.
-Có thể override mỗi lần chạy bằng `--discount`.
-
-## 3. Chạy
-
-### Cách 1 - Web app (khuyến nghị, không cần biết dòng lệnh)
+Chạy thủ công:
 
 ```bash
-python webapp.py
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt      # Windows: .venv\Scripts\pip install -r requirements.txt
+.venv/bin/python webapp.py                     # thêm --port 9000 / --no-browser nếu cần
 ```
 
-hoặc double-click `start_webapp.bat`, rồi mở **http://127.0.0.1:5000** trên
-browser. Có form nhập URL, chọn giảm giá/trạng thái/category, bấm "Bắt đầu
-import" và xem log chạy trực tiếp ngay trên trang - không cần chạy gì qua
-dòng lệnh hay nhờ AI mỗi lần import nữa. Web app này chạy **local trên máy
-bạn** (không public ra internet) vì nó cầm API key/App Password của bạn.
+> Cổng mặc định là 8686, không dùng 5000 vì macOS dành cổng 5000 cho AirPlay. Nếu cổng bận, app tự chọn cổng kế tiếp.
+> Ứng dụng chỉ nhận kết nối từ chính máy này vì nó giữ key của cửa hàng.
 
-### Cách 2 - Dòng lệnh
+## 2. Cấu hình
 
-**Một sản phẩm** (tạo `simple product`):
+Vào trang **Cài đặt** trong app, điền đủ 4 nhóm rồi bấm *Kiểm tra kết nối*. Thông tin được lưu vào file `.env`
+cạnh mã nguồn (xem mẫu `.env.example`).
+
+| Nhóm | Cần gì | Lấy ở đâu |
+|---|---|---|
+| Website WooCommerce | Địa chỉ website, Consumer Key, Consumer Secret | WooCommerce › Settings › Advanced › REST API › Add key (quyền **Read/Write**) |
+| Upload ảnh | Tên đăng nhập WordPress + **Application Password** | wp-admin › Users › Profile › Application Passwords. WooCommerce key không upload ảnh được. |
+| AI | Anthropic API key, chọn model | console.anthropic.com |
+| Mặc định | Số tiền giảm giá, trạng thái khi đăng | Đổi được cho từng lần nhập |
+
+## 3. Cách dùng
+
+1. **Nhập sản phẩm** → dán link flycampro.vn:
+   - 1 link → sản phẩm đơn.
+   - Nhiều link của cùng một máy (Creator Combo, Standard Combo…) → 1 sản phẩm có thuộc tính *Phiên bản*.
+2. Chỉnh tuỳ chọn (giảm giá, trạng thái, danh mục…) → **Bắt đầu nhập**.
+3. Ứng dụng tải trang, xử lý ảnh, AI viết nội dung (thường 30–90 giây). Bạn có thể rời trang, quá trình vẫn chạy nền.
+4. **Duyệt**: kiểm tra số liệu, sửa nội dung, sắp xếp ảnh, chỉnh giá → **Đăng lên WooCommerce**.
+5. Xong: mở sản phẩm trong WordPress hoặc xem trên cửa hàng.
+
+Tắt *Duyệt trước khi đăng* nếu muốn chạy thẳng từ đầu đến cuối.
+
+### Khi sản phẩm đã có trên website
+
+Ứng dụng nhận biết sản phẩm theo SKU (`fcp-<slug>`) và cho bạn chọn cách xử lý:
+
+- **Giữ nguyên nội dung** (mặc định):
+  - Với sản phẩm đơn, không thay đổi gì.
+  - Với sản phẩm nhiều phiên bản, chỉ **thêm các phiên bản còn thiếu**, ví dụ khi flycampro ra combo mới. Phiên bản mới được thêm vào thuộc tính *Phiên bản* của sản phẩm cha.
+- **Cập nhật toàn bộ**: ghi đè tên, mô tả, ảnh, giá của sản phẩm và các phiên bản.
+
+## 4. Dòng lệnh (không có bước duyệt)
 
 ```bash
-python import_product.py https://flycampro.vn/products/dji-pocket-4-creator-combo
+.venv/bin/python import_product.py https://flycampro.vn/products/dji-pocket-4-creator-combo
+.venv/bin/python import_product.py <link-combo-1> <link-combo-2> --discount 100000 --status publish --category "Gimbal camera"
 ```
-
-**Nhiều URL cùng một dòng sản phẩm, khác combo/phiên bản** (flycampro hay tách
-mỗi combo thành 1 trang riêng) → gộp thành **1 `variable product`** với option
-để khách chọn, mỗi option tự đổi giá, ảnh đại diện, và mô tả riêng ("trong hộp
-có gì"):
-
-```bash
-python import_product.py https://flycampro.vn/products/dji-pocket-4-creator-combo https://flycampro.vn/products/dji-pocket-4-standard-combo
-```
-
-Tên option lấy từ phần khác nhau giữa các tiêu đề gốc (vd: "Creator Combo" /
-"Standard Combo"); tên sản phẩm cha là phần chung ("DJI Pocket 4"). Ảnh
-"trong hộp có gì" của mỗi option được Claude (vision) tự đọc từ ảnh flat-lay
-phụ kiện trên trang gốc.
-
-Các cờ tuỳ chọn:
 
 | Cờ | Ý nghĩa |
 |---|---|
-| `--discount 100000` | Ghi đè số tiền giảm giá cho lần chạy này |
-| `--status publish` | Đăng công khai ngay thay vì tạo nháp (`draft`) |
-| `--category "Gimbal camera"` | Gán category có sẵn trên site (cách nhau bởi dấu phẩy nếu nhiều) — category phải tồn tại sẵn, script không tự tạo mới; category cha cũng tự được gán kèm |
-| `--force-scrape` | Bỏ qua cache, scrape lại trang gốc |
-| `--force-rewrite` | Bỏ qua cache, gọi lại Claude để viết lại nội dung |
+| `--discount 100000` | Số tiền trừ vào giá gốc để ra giá khuyến mãi |
+| `--status draft\|pending\|publish` | Trạng thái khi tạo |
+| `--category "A, B"` | Tên danh mục có sẵn trên site (khớp chính xác; danh mục cha tự gán kèm) |
+| `--update` | Sản phẩm đã có thì ghi đè nội dung/giá |
+| `--no-box` | Bỏ qua bước AI đọc phụ kiện trong hộp |
+| `--force-scrape` / `--force-rewrite` | Bỏ qua cache, tải lại trang gốc / gọi lại AI |
 
-Script in log rõ từng bước (`SCRAPE` → `IMAGES` → `REWRITE` → `WOOCOMMERCE`) và
-kết thúc bằng link sản phẩm vừa tạo trên trang quản trị WordPress.
+## 5. Cơ chế hoạt động
 
-Nếu site có taxonomy **Brands** riêng (native WooCommerce Brands, endpoint
-`wc/v3/products/brands`), script tự tìm term khớp với brand đã scrape (mặc
-định `DJI`) và gán vào - không cần cờ gì thêm. Nếu site không có taxonomy này
-thì bỏ qua, không lỗi.
+```
+Link ─► Lấy dữ liệu ─► Xử lý ảnh ─► AI viết nội dung ─► Duyệt ─► Upload ảnh ─► Đăng sản phẩm
+        raw.json       _original/     rewritten.json     draft     media_index   state.json
+                       ảnh sạch       box_description
+```
 
-## 4. Cơ chế hoạt động & an toàn khi chạy lại
+- **Cache** ở `cache/<slug>/`. Lỗi giữa chừng thì bấm *Thử lại*: các bước đã xong được dùng lại, không tốn thêm tiền AI.
+- **Xoá logo**:
+  - Ảnh gốc giữ trong `images/_original/`, ảnh đã xử lý ở `images/`.
+  - Thuật toán chỉ tô vùng logo khi nền đồng nhất và cụm điểm ảnh có kích thước giống logo. Phần sản phẩm lấn vào góc ảnh được giữ nguyên.
+- **AI**:
+  - Claude trả về JSON có cấu trúc, còn HTML do ứng dụng dựng và escape.
+  - Bảng thông số không qua AI nên giữ nguyên số liệu gốc.
+  - Danh sách phụ kiện ưu tiên đọc ảnh "Trong hộp có gì" chính thức trên trang, rồi mới tới ảnh flat-lay.
+- **Chống upload trùng**: mỗi ảnh được nhận diện bằng SHA-1 (`data/media_index.json`). Ảnh đã có trên site thì dùng lại media cũ.
+- **Lịch sử** phiên nhập, nhật ký, danh sách sản phẩm lưu trong `data/app.db` (SQLite).
 
-Mỗi sản phẩm có một thư mục cache riêng tại `cache/<slug-san-pham>/`:
+## 6. Cấu trúc thư mục
 
-- `raw.json` — dữ liệu đã scrape (tên, giá, mô tả, thông số, danh sách ảnh)
-- `images/` — ảnh gốc đã tải về, đặt tên `<slug>-01.jpg`, `<slug>-02.jpg`, ...
-- `rewritten.json` — nội dung Claude đã viết lại
-- `state.json` — media ID đã upload lên WordPress + ID/link sản phẩm đã tạo
+```
+webapp.py              Khởi động web app
+import_product.py      Bản dòng lệnh
+lib/
+  pipeline.py          Luồng chuẩn bị bản nháp → đăng sản phẩm
+  scraper.py           Đọc trang flycampro.vn (2 kiểu bảng thông số)
+  images.py            Tải ảnh, giữ bản gốc, gọi xoá logo
+  watermark.py         Phát hiện và xoá logo
+  rewriter.py          Gọi Claude (viết nội dung, đọc phụ kiện)
+  wc_client.py         WooCommerce REST + WordPress media
+  html_utils.py        Làm sạch HTML, dựng bảng thông số
+  settings.py          Đọc/ghi .env, đường dẫn
+web/
+  app.py, jobs.py, db.py   Flask, hàng đợi xử lý nền, SQLite
+  templates/, static/      Giao diện (CSS + JavaScript, không cần build)
+tests/                 Test tự động (không gọi mạng, không đụng cửa hàng thật)
+```
 
-Nếu script lỗi giữa chừng (mạng đứt, API rate-limit, v.v.), **chạy lại đúng
-lệnh cũ** — các bước đã hoàn thành sẽ được đọc từ cache thay vì làm lại
-(kể cả từng ảnh đã upload lên WordPress). Nếu sản phẩm đã được tạo thành
-công trên WooCommerce trước đó (theo SKU `fcp-<slug>`), script sẽ báo đã tồn
-tại và **không tạo trùng**.
+## 7. Phát triển
 
-## 5. Xóa logo flycampro trên ảnh
+```bash
+.venv/bin/pip install pytest
+.venv/bin/python -m pytest -q tests
+.venv/bin/python webapp.py --debug --no-browser
+```
 
-Ảnh sản phẩm trên flycampro.vn có logo "FLYCAM PRO.VN" ở góc trên-trái, nền
-trắng đồng nhất. Sau khi tải ảnh về, script tự động dò vùng logo (so màu với
-nền trắng lấy mẫu từ góc trên-phải) rồi phủ đè bằng đúng màu nền — giữ nguyên
-kích thước/bố cục ảnh, không cắt xén nội dung sản phẩm. Xử lý ở
-[lib/watermark.py](lib/watermark.py), chạy tự động cho mọi ảnh trong bước
-`IMAGES`, không cần cấu hình gì thêm.
+## 8. Lưu ý
 
-## 6. Giới hạn hiện tại
-
-- Chỉ lấy dữ liệu của **biến thể mặc định** trên chính trang flycampro.vn (nếu
-  1 trang có nhiều option riêng của flycampro, chỉ lấy option đầu) — việc gộp
-  nhiều *trang* thành 1 variable product (mục 3 ở trên) là chuyện khác, đã hỗ trợ.
-- Category phải gán thủ công bằng `--category` mỗi lần chạy (không tự suy luận
-  loại sản phẩm) — brand thì tự động nếu site có taxonomy Brands.
-- Tag tự sinh chỉ gồm brand + tên dòng sản phẩm, khá tối giản.
-- Bảng thông số kỹ thuật giữ nguyên số liệu gốc, được chèn vào cuối phần mô
-  tả sản phẩm dưới dạng bảng HTML (Claude không chạm vào phần này).
+- Chỉ hỗ trợ link dạng `flycampro.vn/products/...`. Nếu trang có nhiều lựa chọn riêng thì chỉ lấy lựa chọn mặc định.
+- AI có thể viết sai. Luôn đọc lại con số trước khi đăng; bảng thông số thì giữ nguyên bản gốc.
+- Một số trang flycampro để bảng thông số bằng tiếng Anh. Ứng dụng giữ nguyên, không tự dịch.

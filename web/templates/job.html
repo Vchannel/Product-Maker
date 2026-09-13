@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Phiên nhập{% endblock %}
+{% block content %}
+<a class="crumb" href="/jobs">{{ icon("arrow-left", "i-sm") }} Phiên nhập</a>
+<div class="page-head" id="job-head">
+  <div class="grow">
+    <div class="skeleton" style="height:28px;width:50%"></div>
+    <div class="skeleton mt-8" style="height:14px;width:30%"></div>
+  </div>
+</div>
+
+<section class="card" style="margin-bottom:20px">
+  <div class="stepper" id="stepper">
+    {% for key, label in stages %}
+    <div class="step" data-stage="{{ key }}">
+      <div class="step-dot"><span class="step-n">{{ loop.index }}</span></div>
+      <div class="step-name">{{ label }}</div>
+      <div class="step-detail"></div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<div id="job-main"></div>
+
+<section class="card mt-24" id="log-card">
+  <div class="card-head" style="border-bottom:0">
+    <h2>{{ icon("terminal") }} Nhật ký <span class="hint" id="log-count"></span></h2>
+    <div class="row">
+      <button class="btn btn-ghost btn-sm" id="log-copy" title="Sao chép nhật ký">{{ icon("copy", "i-sm") }} Sao chép</button>
+      <button class="btn btn-ghost btn-sm" id="log-toggle" aria-expanded="true">{{ icon("chevron-down", "i-sm") }} <span>Thu gọn</span></button>
+    </div>
+  </div>
+  <div class="console" id="console"><div class="console-empty">Đang chờ…</div></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  window.PM_JOB = {{ job_id|tojson }};
+  window.PM_STAGES = {{ stages|tojson }};
+  window.PM_STATUSES = {{ statuses|tojson }};
+</script>
+<script type="module" src="{{ url_for('static', filename='js/job.js') }}?v={{ version }}"></script>
+{% endblock %}

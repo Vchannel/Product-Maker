@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Nhập sản phẩm{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Nhập sản phẩm</h1>
+    <p class="sub">Dán link từ flycampro.vn - xem trước ngay, chỉnh tuỳ chọn rồi bắt đầu.</p>
+  </div>
+</div>
+
+{% if missing_keys %}
+<div class="alert warning" style="margin-bottom:20px">
+  {{ icon("alert") }}
+  <div class="alert-body">
+    <b>Chưa cấu hình đủ kết nối</b>
+    <span>Bạn vẫn xem trước được, nhưng cần điền {{ missing_keys|join(", ") }} trong <a href="/settings">Cài đặt</a> trước khi AI viết nội dung và đăng sản phẩm.</span>
+  </div>
+</div>
+{% endif %}
+
+<div class="split">
+  <div class="stack">
+    <section class="card">
+      <div class="card-head">
+        <h2><span class="step-no">1</span> Link sản phẩm</h2>
+        <span class="hint">Mỗi dòng 1 link · tối đa 12</span>
+      </div>
+      <div class="card-body stack">
+        <div class="url-box">
+          <textarea class="textarea" id="urls" spellcheck="false" autocomplete="off"
+            placeholder="https://flycampro.vn/products/dji-pocket-4-creator-combo&#10;https://flycampro.vn/products/dji-pocket-4-standard-combo"></textarea>
+          <span class="url-count" id="url-count"></span>
+        </div>
+        <div class="alert info small">
+          {{ icon("info") }}
+          <div class="alert-body">
+            <span><b>1 link</b> → 1 sản phẩm đơn. <b>Nhiều link của cùng một máy</b> (các combo khác nhau) → gộp thành <b>1 sản phẩm có nhiều phiên bản</b>, khách chọn combo và giá tự đổi.</span>
+          </div>
+        </div>
+        <div id="preview" class="stack-sm"></div>
+      </div>
+    </section>
+  </div>
+
+  <aside class="stack sticky">
+    <section class="card">
+      <div class="card-head"><h2><span class="step-no">2</span> Tuỳ chọn</h2></div>
+      <div class="card-body">
+        <div class="field">
+          <label class="label" for="discount">Giảm giá so với giá gốc</label>
+          <div class="input-group">
+            <input class="input num" id="discount" inputmode="numeric" value="{{ '{:,}'.format(defaults.discount_vnd).replace(',', '.') }}">
+            <span class="suffix">đ</span>
+          </div>
+          <div class="help" id="discount-help">Giá khuyến mãi = giá gốc − số tiền này. Để 0 nếu không giảm.</div>
+        </div>
+
+        <div class="field">
+          <span class="label">Trạng thái khi đăng</span>
+          <div class="segmented" id="status" role="radiogroup">
+            {% for value, label in statuses %}
+            <button type="button" data-value="{{ value }}" class="{{ 'on' if value == defaults.status }}" role="radio">{{ label.split(' (')[0] }}</button>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="label">Danh mục <span class="opt">tuỳ chọn</span></span>
+          <div id="categories"></div>
+          <div class="help">Danh mục cha được gán kèm tự động.</div>
+        </div>
+
+        <div class="field" style="gap:0">
+          <label class="switch">
+            <input type="checkbox" id="opt-review" checked><span class="track"></span>
+            <span class="text"><b>Duyệt trước khi đăng</b><span>Xem &amp; sửa nội dung AI viết trước khi lên site</span></span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="opt-box" checked><span class="track"></span>
+            <span class="text"><b>AI xem ảnh sản phẩm</b><span>Chọn ảnh đại diện đơn giản, ảnh bày phụ kiện cho từng combo, liệt kê "Trong hộp có gì"</span></span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="opt-images" checked><span class="track"></span>
+            <span class="text"><b>Chèn ảnh vào mô tả</b><span>Rải ảnh sản phẩm xen giữa các đoạn</span></span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="opt-specs" checked><span class="track"></span>
+            <span class="text"><b>Thêm bảng thông số kỹ thuật</b><span>Giữ nguyên số liệu gốc, cuối phần mô tả</span></span>
+          </label>
+        </div>
+
+        <details class="disclosure mt-8">
+          <summary>{{ icon("chevron-right", "i-sm") }} Nâng cao</summary>
+          <div class="stack-sm mt-12">
+            <div class="field">
+              <span class="label">Nếu sản phẩm đã có trên site</span>
+              <select class="select" id="on-exists">
+                <option value="skip">Giữ nội dung, chỉ thêm phiên bản còn thiếu</option>
+                <option value="update">Cập nhật toàn bộ nội dung &amp; giá</option>
+              </select>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="opt-force-scrape"><span class="track"></span>
+              <span class="text"><b>Tải lại trang gốc</b><span>Bỏ qua dữ liệu đã lưu (khi flycampro vừa đổi giá)</span></span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="opt-force-rewrite"><span class="track"></span>
+              <span class="text"><b>Bắt AI viết bản mới</b><span>Không dùng lại nội dung đã viết lần trước</span></span>
+            </label>
+            <div class="help">AI: <code>{{ defaults.model }}</code> · đổi trong <a href="/settings">Cài đặt</a></div>
+          </div>
+        </details>
+      </div>
+      <div class="card-foot">
+        <button class="btn btn-primary btn-lg btn-block" id="start" disabled>{{ icon("play") }} Bắt đầu nhập</button>
+        <div class="help mt-8" id="start-help" style="text-align:center">Dán ít nhất 1 link để bắt đầu</div>
+      </div>
+    </section>
+  </aside>
+</div>
+{% endblock %}
+{% block scripts %}<script type="module" src="{{ url_for('static', filename='js/import.js') }}?v={{ version }}"></script>{% endblock %}

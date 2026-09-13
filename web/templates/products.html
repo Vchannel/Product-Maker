@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Sản phẩm{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Sản phẩm đã nhập</h1>
+    <p class="sub">Các sản phẩm ứng dụng đã tạo trên {{ site_url.replace('https://', '') if site_url else 'website' }}.</p>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-secondary" id="sync" title="Lấy trạng thái, tên, ảnh mới nhất từ WooCommerce">{{ icon("refresh") }} Đồng bộ với website</button>
+    <a class="btn btn-primary" href="/import">{{ icon("plus") }} Nhập sản phẩm</a>
+  </div>
+</div>
+
+<div class="toolbar">
+  <label class="search">{{ icon("search") }}<input class="input" id="q" placeholder="Tìm theo tên hoặc SKU…" autocomplete="off"></label>
+  <select class="select" id="kind" style="width:auto">
+    <option value="">Mọi loại</option>
+    <option value="simple">Sản phẩm đơn</option>
+    <option value="variable">Nhiều phiên bản</option>
+  </select>
+  <select class="select" id="status" style="width:auto">
+    <option value="">Mọi trạng thái</option>
+    <option value="publish">Đang bán</option>
+    <option value="draft">Nháp</option>
+    <option value="pending">Chờ duyệt</option>
+    <option value="missing">Không còn trên site</option>
+  </select>
+  <span class="small faint" id="sync-info"></span>
+</div>
+
+<section class="card" id="products"><div class="card-body"><div class="skeleton" style="height:160px"></div></div></section>
+{% endblock %}
+{% block scripts %}<script type="module" src="{{ url_for('static', filename='js/products.js') }}?v={{ version }}"></script>{% endblock %}

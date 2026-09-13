@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Tổng quan{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Xin chào 👋</h1>
+    <p class="sub">Nhập sản phẩm DJI từ flycampro.vn lên cửa hàng chỉ với vài cú nhấp.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-primary" href="/import">{{ icon("plus") }} Nhập sản phẩm</a>
+  </div>
+</div>
+
+{% if missing_keys %}
+<div class="alert warning" style="margin-bottom:20px">
+  {{ icon("alert") }}
+  <div class="alert-body">
+    <b>Chưa kết nối xong</b>
+    <span>Còn thiếu {{ missing_keys|length }} thông tin cấu hình ({{ missing_keys|join(", ") }}). Ứng dụng cần các thông tin này để đăng sản phẩm và gọi AI.</span>
+    <div class="alert-actions"><a class="btn btn-secondary btn-sm" href="/settings">{{ icon("settings") }} Mở Cài đặt</a></div>
+  </div>
+</div>
+{% endif %}
+
+<form class="card" id="quick-import" style="margin-bottom:20px">
+  <div class="card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <div class="plan-icon" style="background:var(--accent-soft)">{{ icon("link") }}</div>
+    <div class="grow" style="min-width:240px">
+      <input class="input input-lg" name="url" placeholder="Dán link sản phẩm flycampro.vn để bắt đầu nhanh…" autocomplete="off">
+    </div>
+    <button class="btn btn-primary btn-lg" type="submit">Tiếp tục {{ icon("arrow-right") }}</button>
+  </div>
+</form>
+
+<div class="grid grid-4" id="stats">
+  {% for s in range(4) %}<div class="card stat"><div class="skeleton" style="height:14px;width:60%"></div><div class="skeleton" style="height:28px;width:40%"></div><div class="skeleton" style="height:12px;width:70%"></div></div>{% endfor %}
+</div>
+
+<div class="split mt-24">
+  <div class="stack">
+    <section class="card" id="attention-card" hidden>
+      <div class="card-head"><h2>{{ icon("alert-circle") }} Cần bạn xử lý</h2></div>
+      <div class="list" id="attention"></div>
+    </section>
+    <section class="card">
+      <div class="card-head">
+        <h2>{{ icon("layers") }} Phiên nhập gần đây</h2>
+        <a class="btn btn-ghost btn-sm" href="/jobs">Xem tất cả {{ icon("chevron-right", "i-sm") }}</a>
+      </div>
+      <div class="list" id="recent-jobs"><div class="card-body"><div class="skeleton" style="height:40px"></div></div></div>
+    </section>
+  </div>
+  <div class="stack">
+    <section class="card">
+      <div class="card-head">
+        <h2>{{ icon("package") }} Sản phẩm mới đăng</h2>
+        <a class="btn btn-ghost btn-sm" href="/products">Tất cả {{ icon("chevron-right", "i-sm") }}</a>
+      </div>
+      <div class="card-body tight" id="recent-products"><div class="skeleton" style="height:140px"></div></div>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>{{ icon("sparkles") }} Quy trình</h2></div>
+      <div class="card-body stack-sm small muted">
+        <div class="row"><span class="step-no">1</span> Dán 1 link (sản phẩm đơn) hoặc nhiều link combo (gộp thành 1 sản phẩm)</div>
+        <div class="row"><span class="step-no">2</span> Ứng dụng tải dữ liệu, xoá logo ảnh, AI viết lại nội dung</div>
+        <div class="row"><span class="step-no">3</span> Bạn duyệt &amp; chỉnh sửa: tên, mô tả, ảnh, giá, phiên bản</div>
+        <div class="row"><span class="step-no">4</span> Bấm Đăng - sản phẩm lên WooCommerce</div>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script type="module" src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ version }}"></script>{% endblock %}
